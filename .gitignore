@@ -1,0 +1,78 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Build outputs
+build/
+dist/
+*.apk
+*.aab
+*.ipa
+android/app/build/
+ios/build/
+ios/Pods/
+
+# Environment & secrets
+.env
+.env.local
+.env.*.local
+*.env
+
+# Download engine temporary files
+server/downloads/temp/
+server/downloads/*.mp4
+server/downloads/*.webm
+server/downloads/*.m4a
+
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V7
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/settings.json
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# React Native
+.expo/
+.expo-shared/
+__pycache__/
+
+# Android signing keys (never commit!)
+android/app/*.jks
+android/app/*.keystore
+android/local.properties
+
+# iOS
+ios/Pods/
+*.xcworkspace
+!default.xcworkspace
+
+# Testing
+coverage/
+.nyc_output/
+
+# yt-dlp cookies (sensitive!)
+cookies.txt
+*.cookies
+
+# Branding config (contains unreleased brand name)
+branding.private.json

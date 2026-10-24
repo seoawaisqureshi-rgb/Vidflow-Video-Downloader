@@ -1,0 +1,17 @@
+{
+  "appName": "VidFlow",
+  "appDisplayName": "VidFlow",
+  "bundleIdAndroid": "com.vidflow.app",
+  "bundleIdIOS": "com.vidflow.app",
+  "appSlug": "vidflow",
+  "appFolderName": "VidFlow",
+  "downloadFolderName": "VidFlow",
+  "version": "1.0.0",
+  "buildNumber": 1,
+  "website": "https://vidflow.app",
+  "supportEmail": "support@vidflow.app",
+  "privacyPolicyUrl": "https://vidflow.app/privacy",
+  "termsUrl": "https://vidflow.app/terms",
+  "description": "All-in-One Video Downloader",
+  "_note": "This file is the single source of truth for branding. Update before public release. Do NOT commit branding.private.json with real final brand name."
+}

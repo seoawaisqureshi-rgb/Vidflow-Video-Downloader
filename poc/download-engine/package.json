@@ -1,0 +1,16 @@
+{
+  "name": "vidflow-poc",
+  "version": "1.0.0",
+  "private": true,
+  "description": "VidFlow Phase 1 PoC — standalone test runner",
+  "scripts": {
+    "test": "npx ts-node --project tsconfig.json test-poc.ts",
+    "install-tools": "winget install yt-dlp && winget install ffmpeg"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@types/node": "^20.14.9",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.5.3"
+  }
+}
