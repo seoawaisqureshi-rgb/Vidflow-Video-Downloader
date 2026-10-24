@@ -19,11 +19,15 @@ ios/Pods/
 .env.*.local
 *.env
 
-# Download engine temporary files
-server/downloads/temp/
-server/downloads/*.mp4
-server/downloads/*.webm
-server/downloads/*.m4a
+# Download engine temporary files and local tool binaries
+server/bin/
+server/downloads/
+poc/test-results/downloads/
+*.mp4
+*.webm
+*.m4a
+*.part
+*.ytdl
 
 # Logs
 logs/

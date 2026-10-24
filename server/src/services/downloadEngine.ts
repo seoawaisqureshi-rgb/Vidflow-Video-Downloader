@@ -72,6 +72,7 @@ export interface DownloadOptions {
   formatId?: string;
   outputDir: string;
   onProgress?: (job: Partial<DownloadJob>) => void;
+  signal?: AbortSignal;
 }
 
 // ─────────────────────────────────────────────
@@ -110,43 +111,43 @@ export const PLATFORM_REGISTRY: PlatformInfo[] = [
     name: 'Facebook',
     domains: ['facebook.com', 'www.facebook.com', 'fb.watch', 'm.facebook.com'],
     status: 'conditional',
-    notes: 'Public videos work. Friend-locked or group content requires session cookies.',
-    requiresAuth: false,
-    requiresCookies: false,
+    notes: 'Public videos work. Private groups and reels require cookies.',
+    requiresAuth: true,
+    requiresCookies: true,
     formats: ['mp4'],
   },
   {
     name: 'X / Twitter',
-    domains: ['twitter.com', 'x.com', 'www.twitter.com', 'www.x.com'],
+    domains: ['twitter.com', 'x.com', 'mobile.twitter.com'],
     status: 'conditional',
-    notes: 'Public tweets with video work. API changes frequent. May require cookies.',
+    notes: 'Public tweets work. Multi-video tweets require selecting the video index.',
     requiresAuth: false,
     requiresCookies: false,
     formats: ['mp4'],
   },
   {
     name: 'Reddit',
-    domains: ['reddit.com', 'www.reddit.com', 'v.redd.it'],
+    domains: ['reddit.com', 'www.reddit.com', 'v.redd.it', 'redd.it'],
     status: 'conditional',
-    notes: 'Native Reddit video (v.redd.it) works but requires FFmpeg to merge audio+video streams.',
+    notes: 'Reddit native videos have separate audio and video streams; FFmpeg merges them. NSFW requires cookies.',
     requiresAuth: false,
     requiresCookies: false,
     formats: ['mp4'],
   },
   {
     name: 'Vimeo',
-    domains: ['vimeo.com', 'www.vimeo.com', 'player.vimeo.com'],
-    status: 'verified',
-    notes: 'Public videos and password-protected videos (with password) work reliably.',
-    requiresAuth: false,
-    requiresCookies: false,
-    formats: ['mp4', 'webm'],
+    domains: ['vimeo.com', 'player.vimeo.com'],
+    status: 'conditional',
+    notes: 'Vimeo web client requires login credentials or session cookies; direct player embeds work conditionally.',
+    requiresAuth: true,
+    requiresCookies: true,
+    formats: ['mp4'],
   },
   {
     name: 'Dailymotion',
     domains: ['dailymotion.com', 'www.dailymotion.com', 'dai.ly'],
     status: 'conditional',
-    notes: 'Most public videos work. Regional restrictions may apply.',
+    notes: 'Public videos work. Geo-restricted content requires proxy.',
     requiresAuth: false,
     requiresCookies: false,
     formats: ['mp4'],
@@ -201,7 +202,7 @@ export function validateUrl(rawUrl: string): { valid: boolean; error?: string; u
     /^192\.168\./,
     /^::1$/,
     /^0\.0\.0\.0$/,
-    /^169\.254\./,  // Link-local
+    /^169\.254\./,      // Link-local / Cloud metadata
     /^fd[0-9a-f]{2}:/i, // IPv6 ULA
   ];
 
@@ -234,19 +235,72 @@ export function detectPlatform(url: string): PlatformInfo | null {
 }
 
 // ─────────────────────────────────────────────
-// yt-dlp Wrapper
+// Binary Resolution (yt-dlp, ffmpeg, ffprobe)
 // ─────────────────────────────────────────────
 
-const YTDLP_BINARY = process.env.YTDLP_BINARY || 'yt-dlp';
-const FFMPEG_BINARY = process.env.FFMPEG_BINARY || 'ffmpeg';
+export function resolveBinary(name: string, envVar?: string): string {
+  if (envVar && process.env[envVar]) {
+    const custom = process.env[envVar]!;
+    if (path.isAbsolute(custom) && fs.existsSync(custom)) return custom;
+    const resolvedFromCwd = path.resolve(process.cwd(), custom);
+    if (fs.existsSync(resolvedFromCwd)) return resolvedFromCwd;
+    const resolvedFromDir = path.resolve(__dirname, '../../', custom);
+    if (fs.existsSync(resolvedFromDir)) return resolvedFromDir;
+    return custom;
+  }
+
+  const exeName = process.platform === 'win32' ? `${name}.exe` : name;
+  const candidates = [
+    path.resolve(__dirname, '../../bin', exeName),
+    path.resolve(__dirname, '../bin', exeName),
+    path.resolve(process.cwd(), 'bin', exeName),
+    path.resolve(process.cwd(), 'server/bin', exeName),
+    path.resolve(process.env.LOCALAPPDATA || '', 'Microsoft/WinGet/Links', exeName),
+    path.resolve(process.env.ProgramFiles || '', exeName),
+  ];
+
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) {
+      return candidate;
+    }
+  }
+
+  return name;
+}
+
+export function getYtDlpPath(): string {
+  return resolveBinary('yt-dlp', 'YTDLP_BINARY');
+}
+
+export function getFfmpegPath(): string {
+  return resolveBinary('ffmpeg', 'FFMPEG_BINARY');
+}
+
+export function getFfprobePath(): string {
+  return resolveBinary('ffprobe', 'FFPROBE_BINARY');
+}
+
+export function getJsRuntimeArgs(): string[] {
+  const denoBin = resolveBinary('deno', 'DENO_BINARY');
+  if (fs.existsSync(denoBin)) {
+    return ['--js-runtimes', `deno:${denoBin}`];
+  }
+  if (process.execPath && fs.existsSync(process.execPath)) {
+    return ['--js-runtimes', `node:${process.execPath}`];
+  }
+  return [];
+}
 
 /**
  * Spawns yt-dlp and collects stdout/stderr, returning on process close.
  */
 function runYtDlp(args: string[]): Promise<{ stdout: string; stderr: string; code: number }> {
   return new Promise((resolve) => {
+    const bin = getYtDlpPath();
+    const runtimeArgs = getJsRuntimeArgs();
+    const finalArgs = [...runtimeArgs, ...args];
     const opts: SpawnOptions = { shell: false };
-    const proc = spawn(YTDLP_BINARY, args, opts);
+    const proc = spawn(bin, finalArgs, opts);
 
     let stdout = '';
     let stderr = '';
@@ -349,34 +403,44 @@ function sanitizeFilename(name: string): string {
 }
 
 /**
- * Downloads a video to local disk.
+ * Downloads a video to local disk with full cancellation & cleanup support.
  * Returns the path of the completed file.
  */
 export async function downloadVideo(options: DownloadOptions): Promise<string> {
-  const { url, formatId, outputDir, onProgress } = options;
+  const { url, formatId, outputDir, onProgress, signal } = options;
 
   const { valid, error } = validateUrl(url);
   if (!valid) throw new Error(error);
+
+  if (signal?.aborted) {
+    throw new Error('Download aborted before start.');
+  }
 
   // Ensure output directory exists
   if (!fs.existsSync(outputDir)) {
     fs.mkdirSync(outputDir, { recursive: true });
   }
 
+  const ffmpegBin = getFfmpegPath();
+  const ytdlpBin = getYtDlpPath();
+
   const args: string[] = [
+    ...getJsRuntimeArgs(),
     '--no-playlist',
-    '--ffmpeg-location', FFMPEG_BINARY,
     '--output', path.join(outputDir, '%(title)s-%(id)s.%(ext)s'),
     '--progress',
-    '--newline',           // One progress line per newline — easier to parse
-    '--no-part',           // Don't leave .part files on cancel
-    '--write-info-json',   // Metadata sidecar
+    '--newline',
+    '--no-part',
+    '--write-info-json',
   ];
+
+  if (fs.existsSync(ffmpegBin) || ffmpegBin !== 'ffmpeg') {
+    args.push('--ffmpeg-location', ffmpegBin);
+  }
 
   if (formatId) {
     args.push('--format', formatId);
   } else {
-    // Default: best quality with audio merged, prefer mp4
     args.push('--format', 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best');
     args.push('--merge-output-format', 'mp4');
   }
@@ -384,14 +448,33 @@ export async function downloadVideo(options: DownloadOptions): Promise<string> {
   args.push(url);
 
   return new Promise((resolve, reject) => {
-    const proc = spawn(YTDLP_BINARY, args, { shell: false });
+    const proc = spawn(ytdlpBin, args, { shell: false });
     let completedFile = '';
     let stderr = '';
+    let isCancelled = false;
+
+    // Handle cancellation signal
+    if (signal) {
+      signal.addEventListener('abort', () => {
+        isCancelled = true;
+        try {
+          proc.kill('SIGTERM');
+          setTimeout(() => {
+            if (!proc.killed) {
+              try { proc.kill('SIGKILL'); } catch {}
+            }
+          }, 1000);
+        } catch {}
+
+        // Clean up partial artifacts
+        cleanupPartialFiles(outputDir, completedFile);
+        reject(new Error('Download cancelled by user.'));
+      }, { once: true });
+    }
 
     proc.stdout?.on('data', (chunk: Buffer) => {
       const lines = chunk.toString().split('\n');
       for (const line of lines) {
-        // Detect completed file
         const destMatch = line.match(/^\[download\] Destination:\s+(.+)$/);
         if (destMatch) completedFile = destMatch[1].trim();
 
@@ -401,7 +484,6 @@ export async function downloadVideo(options: DownloadOptions): Promise<string> {
         const alreadyMatch = line.match(/^\[download\] (.+) has already been downloaded$/);
         if (alreadyMatch) completedFile = alreadyMatch[1].trim();
 
-        // Progress events
         const progress = parseProgressLine(line);
         if (progress && onProgress) onProgress(progress);
       }
@@ -412,10 +494,11 @@ export async function downloadVideo(options: DownloadOptions): Promise<string> {
     });
 
     proc.on('close', (code) => {
+      if (isCancelled) return;
+
       if (code === 0 && completedFile && fs.existsSync(completedFile)) {
         resolve(completedFile);
       } else if (code === 0) {
-        // Try to find the most recently modified file in outputDir
         const files = fs.readdirSync(outputDir)
           .filter(f => !f.endsWith('.info.json') && !f.endsWith('.part'))
           .map(f => ({ name: f, mtime: fs.statSync(path.join(outputDir, f)).mtime }))
@@ -432,10 +515,11 @@ export async function downloadVideo(options: DownloadOptions): Promise<string> {
     });
 
     proc.on('error', (err) => {
+      if (isCancelled) return;
       if ((err as any).code === 'ENOENT') {
         reject(new Error(
-          `yt-dlp binary not found at "${YTDLP_BINARY}". ` +
-          `Please install yt-dlp: https://github.com/yt-dlp/yt-dlp#installation`
+          `yt-dlp binary not found at "${ytdlpBin}". ` +
+          `Please ensure yt-dlp is installed.`
         ));
       } else {
         reject(err);
@@ -444,16 +528,151 @@ export async function downloadVideo(options: DownloadOptions): Promise<string> {
   });
 }
 
+function cleanupPartialFiles(outputDir: string, specificFile?: string) {
+  try {
+    if (specificFile && fs.existsSync(specificFile)) {
+      fs.unlinkSync(specificFile);
+    }
+    if (fs.existsSync(outputDir)) {
+      const entries = fs.readdirSync(outputDir);
+      for (const entry of entries) {
+        if (entry.endsWith('.part') || entry.endsWith('.ytdl')) {
+          try { fs.unlinkSync(path.join(outputDir, entry)); } catch {}
+        }
+      }
+    }
+  } catch {}
+}
+
 /**
- * Checks whether yt-dlp binary is available and returns its version.
+ * Checks whether yt-dlp binary is available, its path, and returns its version.
  */
-export async function checkYtDlpInstalled(): Promise<{ installed: boolean; version?: string; error?: string }> {
+export async function checkYtDlpInstalled(): Promise<{ installed: boolean; version?: string; binaryPath?: string; error?: string }> {
+  const binaryPath = getYtDlpPath();
   const { stdout, stderr, code } = await runYtDlp(['--version']);
   if (code === 0) {
-    return { installed: true, version: stdout.trim() };
+    return { installed: true, version: stdout.trim(), binaryPath };
   }
   if (stderr.includes('ENOENT') || stderr.includes('not found')) {
-    return { installed: false, error: 'yt-dlp binary not found on PATH.' };
+    return { installed: false, binaryPath, error: `yt-dlp binary not found at "${binaryPath}".` };
   }
-  return { installed: false, error: stderr.slice(0, 200) };
+  return { installed: false, binaryPath, error: stderr.slice(0, 200) };
+}
+
+/**
+ * Checks whether FFmpeg binary is available, its path, and returns its version.
+ */
+export function checkFFmpegInstalled(): Promise<{ installed: boolean; version?: string; binaryPath?: string; error?: string }> {
+  return new Promise((resolve) => {
+    const binaryPath = getFfmpegPath();
+    const proc = spawn(binaryPath, ['-version'], { shell: false });
+    let stdout = '';
+    let stderr = '';
+
+    proc.stdout?.on('data', (d: Buffer) => { stdout += d.toString(); });
+    proc.stderr?.on('data', (d: Buffer) => { stderr += d.toString(); });
+
+    proc.on('close', (code) => {
+      if (code === 0) {
+        const firstLine = stdout.split('\n')[0] || '';
+        const match = firstLine.match(/ffmpeg version ([^\s]+)/);
+        const version = match ? match[1] : firstLine;
+        resolve({ installed: true, version, binaryPath });
+      } else {
+        resolve({ installed: false, binaryPath, error: `Exit code ${code}` });
+      }
+    });
+
+    proc.on('error', (err) => {
+      resolve({ installed: false, binaryPath, error: err.message });
+    });
+  });
+}
+
+export interface MediaIntegrityResult {
+  valid: boolean;
+  duration?: number;
+  format?: string;
+  videoCodec?: string;
+  audioCodec?: string;
+  width?: number;
+  height?: number;
+  sizeBytes?: number;
+  error?: string;
+}
+
+/**
+ * Verifies downloaded media file integrity using ffprobe.
+ */
+export function verifyMediaIntegrity(filePath: string): Promise<MediaIntegrityResult> {
+  return new Promise((resolve) => {
+    if (!fs.existsSync(filePath)) {
+      return resolve({ valid: false, error: 'File does not exist on disk.' });
+    }
+
+    const stat = fs.statSync(filePath);
+    if (stat.size === 0) {
+      return resolve({ valid: false, error: 'File exists but is empty (0 bytes).' });
+    }
+
+    const ffprobeBin = getFfprobePath();
+    const args = [
+      '-v', 'error',
+      '-show_entries', 'format=duration,format_name,size:stream=codec_type,codec_name,width,height',
+      '-of', 'json',
+      filePath,
+    ];
+
+    const proc = spawn(ffprobeBin, args, { shell: false });
+    let stdout = '';
+    let stderr = '';
+
+    proc.stdout?.on('data', (d: Buffer) => { stdout += d.toString(); });
+    proc.stderr?.on('data', (d: Buffer) => { stderr += d.toString(); });
+
+    proc.on('close', (code) => {
+      if (code !== 0) {
+        // Fallback: If ffprobe fails, but file exists and has non-zero size
+        return resolve({
+          valid: stat.size > 1024,
+          sizeBytes: stat.size,
+          error: stderr ? stderr.slice(0, 200) : 'ffprobe check failed',
+        });
+      }
+
+      try {
+        const parsed = JSON.parse(stdout);
+        const duration = parseFloat(parsed.format?.duration || '0');
+        const formatName = parsed.format?.format_name;
+        const streams = parsed.streams || [];
+        const videoStream = streams.find((s: any) => s.codec_type === 'video');
+        const audioStream = streams.find((s: any) => s.codec_type === 'audio');
+
+        resolve({
+          valid: true,
+          duration,
+          format: formatName,
+          videoCodec: videoStream?.codec_name,
+          audioCodec: audioStream?.codec_name,
+          width: videoStream?.width,
+          height: videoStream?.height,
+          sizeBytes: stat.size,
+        });
+      } catch (err: any) {
+        resolve({
+          valid: stat.size > 1024,
+          sizeBytes: stat.size,
+          error: `Failed to parse ffprobe output: ${err.message}`,
+        });
+      }
+    });
+
+    proc.on('error', (err) => {
+      resolve({
+        valid: stat.size > 1024,
+        sizeBytes: stat.size,
+        error: `ffprobe error: ${err.message}`,
+      });
+    });
+  });
 }

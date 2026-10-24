@@ -8,8 +8,9 @@ import { io } from '../index';
 
 export const downloadRoutes = Router();
 
-// In-memory job store — Phase 1 (will move to DB in Phase 3)
+// In-memory job store & abort controllers — Phase 1 (will move to Redis/DB in Phase 3)
 const activeJobs = new Map<string, DownloadJob>();
+const jobControllers = new Map<string, AbortController>();
 
 const DOWNLOAD_DIR = path.resolve(process.env.DOWNLOAD_DIR || './downloads');
 
@@ -58,8 +59,11 @@ downloadRoutes.post(
       });
     }
 
-    // Create job
+    // Create job & controller
     const jobId = uuidv4();
+    const controller = new AbortController();
+    jobControllers.set(jobId, controller);
+
     const job: DownloadJob = {
       jobId,
       url,
@@ -80,8 +84,9 @@ downloadRoutes.post(
       socketEvent: `download:${jobId}`,
     });
 
-    // Start download asynchronously
-    runDownloadJob(job);
+    // Start download asynchronously with cancellation signal
+    runDownloadJob(job, controller);
+    return;
   }
 );
 
@@ -146,20 +151,22 @@ downloadRoutes.get(
       // Clean up file after transfer
       try {
         fs.unlinkSync(job.filename!);
-        // Also remove .info.json if present
         const infoJson = job.filename!.replace(/\.[^.]+$/, '.info.json');
         if (fs.existsSync(infoJson)) fs.unlinkSync(infoJson);
         activeJobs.delete(job.jobId);
+        jobControllers.delete(job.jobId);
       } catch (err) {
         console.error('[Download] Cleanup error:', err);
       }
     });
+
+    return;
   }
 );
 
 /**
  * DELETE /api/v1/downloads/:jobId
- * Cancels a pending or in-progress job.
+ * Cancels a pending or in-progress job and cleans up child processes and files.
  */
 downloadRoutes.delete(
   '/:jobId',
@@ -175,9 +182,17 @@ downloadRoutes.delete(
       return res.status(404).json({ error: 'Job not found' });
     }
 
+    // Abort process if running
+    const controller = jobControllers.get(job.jobId);
+    if (controller) {
+      controller.abort();
+      jobControllers.delete(job.jobId);
+    }
+
     job.status = 'cancelled';
+    emitJobUpdate(job);
     activeJobs.delete(job.jobId);
-    return res.json({ success: true, message: 'Job cancelled' });
+    return res.json({ success: true, message: 'Job cancelled and process terminated' });
   }
 );
 
@@ -216,7 +231,7 @@ function sanitizeJob(job: DownloadJob): Partial<DownloadJob> {
 /**
  * Runs a download job and emits progress via WebSocket.
  */
-async function runDownloadJob(job: DownloadJob) {
+async function runDownloadJob(job: DownloadJob, controller: AbortController) {
   try {
     job.status = 'downloading';
     emitJobUpdate(job);
@@ -225,6 +240,7 @@ async function runDownloadJob(job: DownloadJob) {
       url: job.url,
       formatId: job.formatId !== 'best' ? job.formatId : undefined,
       outputDir: job.outputPath,
+      signal: controller.signal,
       onProgress: (update) => {
         Object.assign(job, update);
         emitJobUpdate(job);
@@ -242,10 +258,16 @@ async function runDownloadJob(job: DownloadJob) {
     emitJobUpdate(job);
     console.log(`[Download] Job ${job.jobId} complete: ${path.basename(filePath)}`);
   } catch (err: any) {
-    job.status = 'failed';
+    if (err.message.includes('cancelled') || err.message.includes('aborted')) {
+      job.status = 'cancelled';
+    } else {
+      job.status = 'failed';
+    }
     job.error = err.message;
     emitJobUpdate(job);
-    console.error(`[Download] Job ${job.jobId} failed:`, err.message);
+    console.error(`[Download] Job ${job.jobId} ended:`, err.message);
+  } finally {
+    jobControllers.delete(job.jobId);
   }
 }
 
