@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  108dp canvas. Safe zone is the centered 72dp square (18–90).
+  Purple stem, cyan chevron, purple tray. Geometry fills ~90% of the safe zone.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Soft halo inside safe zone -->
+    <path
+        android:fillColor="#337C3AED"
+        android:pathData="M54,54m-28,0a28,28 0,1,1 56,0a28,28 0,1,1 -56,0" />
+
+    <!-- Stem -->
+    <path
+        android:fillColor="#8B5CF6"
+        android:pathData="M47,22 L61,22 L61,50 L47,50 Z" />
+
+    <!-- Cyan chevron arrow head — tip stays above y=82 -->
+    <path
+        android:fillColor="#06B6D4"
+        android:pathData="M28,48 L54,78 L80,48 L68,40 L54,58 L40,40 Z" />
+
+    <!-- Tray bar (y=82–88, inside 18–90) -->
+    <path
+        android:fillColor="#8B5CF6"
+        android:pathData="M30,82 L78,82 L78,88 L30,88 Z" />
+</vector>

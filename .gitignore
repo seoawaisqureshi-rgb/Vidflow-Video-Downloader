@@ -55,6 +55,13 @@ desktop.ini
 *.sln
 *.sw?
 
+# Kotlin / Gradle
+.gradle/
+.kotlin/
+android/.gradle/
+android/.kotlin/
+*.salive
+
 # React Native
 .expo/
 .expo-shared/

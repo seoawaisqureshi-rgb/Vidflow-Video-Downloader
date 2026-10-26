@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Shape gradient (not aapt:attr) — OEM launchers reliably render this as adaptive background. -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <gradient
+        android:type="linear"
+        android:angle="135"
+        android:startColor="#0F172A"
+        android:endColor="#1E1B4B" />
+</shape>
