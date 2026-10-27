@@ -220,6 +220,25 @@ cd android
   - Updated `HomeViewModel.startDownload(...)` with explicit `overrideFormat` parameter and fallback to `info.formats.firstOrNull()`.
   - Prevented silent no-ops when download button is pressed from dialog or floating action button.
 
+### 5. Definitive 5-Issue Social Media In-App Browsing & Crash Resolution
+- **Issue 1: Facebook Blank Page**:
+  - Replaced legacy mobile URL `https://m.facebook.com/` (which returned HTTP 400 Bad Request to mobile webview) with official responsive endpoint `https://www.facebook.com/`.
+  - Disabled `setSupportMultipleWindows(false)` to prevent Chromium window-detach blanking on OAuth and feed interactions.
+- **Issue 2: Instagram "Do Nothing" on Click & Login Blank Screen**:
+  - Root cause of blank screen on login: `WebChromeClient.onCreateWindow` was assigning the same source `WebView` to `transport.webView`, causing Chromium to blank out the frame. Fixed by setting `setSupportMultipleWindows(false)` and routing any unexpected `onCreateWindow` requests safely through a temporary transport `WebView` into the main viewer.
+  - Root cause of "do nothing": custom app schemes (`instagram://`) had no fallback handling. Added proper intent parsing and fallback navigation.
+  - Standardized User-Agent to official Chrome Mobile format (`Android 10; K`) to eliminate Instagram bot-detection interstitials.
+- **Issue 3: Pinterest Blank Screen After Login**:
+  - Eliminated the popup window collision during OAuth login redirects via safe single-window architecture and temporary transport routing.
+  - Ensured third-party cookies and DOM storage remain active throughout login transitions.
+- **Issue 4: Threads Launching External App**:
+  - Root cause: `shouldOverrideUrlLoading` returned `false` for HTTP/HTTPS requests, allowing Android OS Digital Asset Links to hijack `threads.net` and launch the external Threads native app.
+  - Fix: Added explicit social platform interception (`isSocialApp`) that forces navigation through `view.loadUrl(urlStr)` and returns `true`, commanding Android OS to keep all browsing strictly inside VidFlow.
+- **Issue 5: TikTok Crash on "Open TikTok" Button**:
+  - Root cause: Tapping "Open TikTok" on the webpage executed JavaScript `window.open("snssdk1233://...")`, triggering `onCreateWindow` where passing the source view caused an immediate Chromium native crash (SIGSEGV / Parent already has view).
+  - Fix: Replaced with safe temporary transport `WebView` and strict scheme interception, preventing any crash and keeping the user inside the browser.
+  - Added TikTok CDN stream sniffing (`tiktokcdn.com`, `byteoversea.com`, `ibytedtos.com`) for direct video downloads.
+
 ---
 
 *Last updated: 2026-10-27*

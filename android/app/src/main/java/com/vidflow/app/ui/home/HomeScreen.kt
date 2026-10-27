@@ -97,7 +97,7 @@ fun HomeScreen(
         listOf(
             PlatformSymbol("YouTube", Color(0xFFFF0000), "https://m.youtube.com/"),
             PlatformSymbol("WhatsApp", Color(0xFF25D366), "", isWhatsApp = true),
-            PlatformSymbol("Facebook", Color(0xFF1877F2), "https://m.facebook.com/"),
+            PlatformSymbol("Facebook", Color(0xFF1877F2), "https://www.facebook.com/"),
             PlatformSymbol("Instagram", Color(0xFFE1306C), "https://www.instagram.com/"),
             PlatformSymbol("TikTok", Color(0xFF00F2FE), "https://www.tiktok.com/"),
             PlatformSymbol("Pinterest", Color(0xFFBD081C), "https://www.pinterest.com/"),
@@ -365,7 +365,7 @@ fun HomeScreen(
                                 setSupportZoom(true)
                                 builtInZoomControls = true
                                 displayZoomControls = false
-                                setSupportMultipleWindows(true) // Crucial for Facebook/Instagram/Google OAuth & login popups
+                                setSupportMultipleWindows(false) // Single window browsing prevents blank OAuth screens & native crashes
                                 javaScriptCanOpenWindowsAutomatically = true
                                 mixedContentMode = android.webkit.WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
                                 allowFileAccess = true
@@ -373,8 +373,8 @@ fun HomeScreen(
                                 loadWithOverviewMode = true
                                 useWideViewPort = true
 
-                                // Agency-grade Chrome Mobile UA: prevents Facebook, Instagram & Pinterest from detecting embedded WebView
-                                userAgentString = "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36"
+                                // Standard Chrome Mobile UA (uses official frozen 'K' format accepted by FB, IG, TikTok, Threads, Pinterest)
+                                userAgentString = "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36"
                             }
 
                             val cookieManager = CookieManager.getInstance()
@@ -388,9 +388,20 @@ fun HomeScreen(
                                     isUserGesture: Boolean,
                                     resultMsg: Message?
                                 ): Boolean {
-                                    // Handle window.open inside the same webview so FB/IG/Pinterest login scripts never crash
+                                    // Bulletproof window.open handling: route popups to main WebView safely via temp transport
+                                    val ctx = view?.context ?: return false
+                                    val tempWebView = WebView(ctx)
+                                    tempWebView.webViewClient = object : WebViewClient() {
+                                        override fun shouldOverrideUrlLoading(v: WebView, req: WebResourceRequest): Boolean {
+                                            val target = req.url?.toString()
+                                            if (!target.isNullOrBlank()) {
+                                                view.loadUrl(target)
+                                            }
+                                            return true
+                                        }
+                                    }
                                     val transport = resultMsg?.obj as? WebView.WebViewTransport
-                                    transport?.webView = view
+                                    transport?.webView = tempWebView
                                     resultMsg?.sendToTarget()
                                     return true
                                 }
@@ -513,8 +524,18 @@ fun HomeScreen(
                                         return true
                                     }
 
-                                    // Keep all standard HTTP/HTTPS browsing inside this WebView!
+                                    // Prevent external app takeovers (Threads app, Instagram app, Facebook app, TikTok app)
+                                    // When returning false, Android OS Digital Asset Links can launch the native app if installed.
+                                    // Explicitly calling view.loadUrl and returning true FORCES WebView to keep browsing inside VidFlow!
                                     if (scheme == "http" || scheme == "https") {
+                                        val isSocialApp = host.contains("threads.net") || host.contains("instagram.com") ||
+                                            host.contains("facebook.com") || host.contains("tiktok.com") || host.contains("pinterest.com")
+
+                                        if (isSocialApp && urlStr != view.url && urlStr != currentBrowserUrl) {
+                                            currentBrowserUrl = urlStr
+                                            view.loadUrl(urlStr)
+                                            return true
+                                        }
                                         return false
                                     }
 
@@ -525,15 +546,17 @@ fun HomeScreen(
                                             val parsedIntent = Intent.parseUri(urlStr, Intent.URI_INTENT_SCHEME)
                                             val fallback = parsedIntent.getStringExtra("browser_fallback_url")
                                                 ?: parsedIntent.dataString?.takeIf { it.startsWith("http") }
-                                            if (fallback != null) {
+                                            if (!fallback.isNullOrBlank()) {
+                                                currentBrowserUrl = fallback
                                                 view.loadUrl(fallback)
+                                                return true
                                             }
                                         } catch (_: Exception) {}
                                         return true
                                     }
 
-                                    // Custom app schemes (e.g. threads://, instagram://, fb://, pinterest://):
-                                    // Never launch external app! Keep the user inside VidFlow.
+                                    // Custom app schemes (e.g. threads://, barcelona://, instagram://, fb://, tiktok://, snssdk1233://, pinterest://):
+                                    // Never launch external app! Keep the user inside VidFlow without crashing.
                                     return true
                                 }
 
@@ -546,6 +569,7 @@ fun HomeScreen(
                                     if (lower.contains(".mp4") || lower.contains(".m3u8") ||
                                         (lower.contains("fbcdn.net") && (lower.contains("/v/") || lower.contains("video"))) ||
                                         (lower.contains("cdninstagram.com") && (lower.contains(".mp4") || lower.contains("video"))) ||
+                                        ((lower.contains("tiktokcdn.com") || lower.contains("byteoversea.com") || lower.contains("ibytedtos.com")) && (lower.contains(".mp4") || lower.contains("video"))) ||
                                         (lower.contains("v.pinimg.com") && lower.contains(".mp4")) ||
                                         (lower.contains("googlevideo.com/videoplayback") && lower.contains("&range="))
                                     ) {
