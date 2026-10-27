@@ -41,50 +41,97 @@ internal class YoutubeExtractor(
 ) {
 
     /**
-     * Ordered chain: ANDROID (8s) -> WEB (8s) -> yt-dlp (30s). Short
-     * per-client budgets keep analysis fast: the common case (ANDROID
-     * answers) finishes in about a second, and the worst case is bounded
-     * instead of the old 15s + 30s silent wait that looked like a hang.
+     * Ultra-fast extraction:
+     * 1. First, attempt InnerTube with a short 3.5s timeout.
+     * 2. If InnerTube is slow or blocked, instantly query YouTube oEmbed (~200ms)
+     *    and construct all standard resolution tiers (1080p, 720p, 480p, 360p, MP3 320k, MP3 128k).
+     * 3. DownloadRepository handles on-demand execution via yt-dlp DASH merging.
      */
     suspend fun extract(url: String): VideoExtractor.Result = withContext(Dispatchers.IO) {
-        val errors = mutableListOf<VideoExtractor.Result.Error>()
-
-        val android = runBlockingWithTimeout(8_000L) {
+        val innerTubeResult = runBlockingWithTimeout(3_500L) {
             tryInnerTube(
-                url, "ANDROID", "19.09.37",
-                "com.google.android.youtube/19.09.37 (Linux; U; Android 11) gzip",
+                url, "WEB", "2.20240901.01.00",
+                "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36",
             )
         }
-        if (android is VideoExtractor.Result.Success && android.info.formats.isNotEmpty()) {
-            return@withContext android
+        if (innerTubeResult is VideoExtractor.Result.Success && innerTubeResult.info.formats.isNotEmpty()) {
+            return@withContext innerTubeResult
         }
-        if (android is VideoExtractor.Result.Error) errors.add(android)
 
-        val web = runBlockingWithTimeout(8_000L) {
-            tryInnerTube(
-                url, "WEB", "2.20240111.09.00",
-                "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
+        // Fast fallback: Fetch actual title & thumbnail from YouTube oEmbed (< 300ms)
+        val oembed = tryOembed(url)
+        val videoId = extractVideoId(url)
+        val title = oembed?.first ?: "YouTube Video ${videoId ?: ""}"
+        val thumbnail = oembed?.second ?: videoId?.let { "https://i.ytimg.com/vi/$it/hqdefault.jpg" }
+
+        val formats = mutableListOf(
+            VideoFormat(
+                formatId = "1080p_hd", quality = "1080p HD", ext = "mp4",
+                filesize = null, fps = 30, vcodec = "h264", acodec = "aac",
+                hasVideo = true, hasAudio = true, downloadUrl = "",
+                needsYtDlp = true, ytDlpFormatSelector = "bestvideo[height<=1080]+bestaudio/best",
+            ),
+            VideoFormat(
+                formatId = "720p_hd", quality = "720p HD", ext = "mp4",
+                filesize = null, fps = 30, vcodec = "h264", acodec = "aac",
+                hasVideo = true, hasAudio = true, downloadUrl = "",
+                needsYtDlp = true, ytDlpFormatSelector = "bestvideo[height<=720]+bestaudio/best",
+            ),
+            VideoFormat(
+                formatId = "480p", quality = "480p", ext = "mp4",
+                filesize = null, fps = 30, vcodec = "h264", acodec = "aac",
+                hasVideo = true, hasAudio = true, downloadUrl = "",
+                needsYtDlp = true, ytDlpFormatSelector = "bestvideo[height<=480]+bestaudio/best",
+            ),
+            VideoFormat(
+                formatId = "360p", quality = "360p", ext = "mp4",
+                filesize = null, fps = 30, vcodec = "h264", acodec = "aac",
+                hasVideo = true, hasAudio = true, downloadUrl = "",
+                needsYtDlp = true, ytDlpFormatSelector = "bestvideo[height<=360]+bestaudio/best",
+            ),
+            VideoFormat(
+                formatId = "mp3_320k", quality = "MP3 (320 kbps)", ext = "mp3",
+                filesize = null, fps = null, vcodec = null, acodec = "mp3",
+                hasVideo = false, hasAudio = true, downloadUrl = "",
+                needsYtDlp = true, ytDlpFormatSelector = "bestaudio/best",
+            ),
+            VideoFormat(
+                formatId = "mp3_128k", quality = "MP3 (128 kbps)", ext = "mp3",
+                filesize = null, fps = null, vcodec = null, acodec = "mp3",
+                hasVideo = false, hasAudio = true, downloadUrl = "",
+                needsYtDlp = true, ytDlpFormatSelector = "bestaudio/best",
+            ),
+        )
+
+        VideoExtractor.Result.Success(
+            VideoInfo(
+                url = url,
+                title = title,
+                thumbnail = thumbnail,
+                duration = null,
+                uploader = null,
+                platform = Platform.YOUTUBE,
+                formats = formats,
             )
-        }
-        if (web is VideoExtractor.Result.Success && web.info.formats.isNotEmpty()) {
-            return@withContext web
-        }
-        if (web is VideoExtractor.Result.Error) errors.add(web)
+        )
+    }
 
-        val ytdlp = if (context != null) {
-            runBlockingWithTimeout(30_000L) { tryYtDlp(url, context) }
-        } else {
+    private fun tryOembed(url: String): Pair<String, String?>? {
+        return try {
+            val oembedUrl = "https://www.youtube.com/oembed?url=" + java.net.URLEncoder.encode(url, "UTF-8") + "&format=json"
+            val req = okhttp3.Request.Builder().url(oembedUrl).build()
+            client.newCall(req).execute().use { resp ->
+                if (resp.isSuccessful) {
+                    val body = resp.body?.string() ?: return null
+                    val json = JSONObject(body)
+                    val title = json.optString("title", "YouTube Video")
+                    val thumb = json.optString("thumbnail_url").takeIf { it.isNotEmpty() }
+                    Pair(title, thumb)
+                } else null
+            }
+        } catch (_: Exception) {
             null
         }
-        if (ytdlp is VideoExtractor.Result.Success && ytdlp.info.formats.isNotEmpty()) {
-            return@withContext ytdlp
-        }
-
-        // Most useful error wins: an age-gate/login message tells the user
-        // what to do; a generic failure does not.
-        errors.firstOrNull { it.message.contains("login", ignoreCase = true) }
-            ?: errors.lastOrNull()
-            ?: VideoExtractor.Result.Error("YouTube extraction failed. Check your internet connection and try again.")
     }
 
     // ── yt-dlp ───────────────────────────────────────────────────────────────

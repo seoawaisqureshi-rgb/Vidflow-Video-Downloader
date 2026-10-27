@@ -202,9 +202,9 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
         _uiState.update { it.copy(selectedFormat = format) }
     }
 
-    fun startDownload() {
+    fun startDownload(overrideFormat: VideoFormat? = null) {
         val info = _uiState.value.videoInfo ?: return
-        val format = _uiState.value.selectedFormat ?: return
+        val format = overrideFormat ?: _uiState.value.selectedFormat ?: info.formats.firstOrNull() ?: return
 
         queuedDownloadUrls.add(info.url)
         lastAnalyzedUrl = info.url
@@ -223,7 +223,7 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
                 selectedFormat = null,
                 urlInput = "",
                 error = null,
-                snackbarMessage = "Download started! Paste next link to queue more.",
+                snackbarMessage = "Download started! See progress in My Files.",
             )
         }
     }

@@ -208,7 +208,7 @@ fun MyFilesScreen(
                     CompletedFileCard(
                         record = record,
                         onPlay = {
-                            val path = record.filePath
+                            val path = record.filePath ?: record.url
                             if (!path.isNullOrBlank()) {
                                 val isVideo = record.ext.lowercase() != "mp3" && record.ext.lowercase() != "m4a"
                                 onOpenPlayer(path, record.title, isVideo)

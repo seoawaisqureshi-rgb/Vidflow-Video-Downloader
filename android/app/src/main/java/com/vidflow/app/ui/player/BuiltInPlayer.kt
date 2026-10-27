@@ -66,23 +66,28 @@ object MediaPlayerManager {
     }
 
     fun play(context: Context, uri: String, title: String, isVideo: Boolean = true) {
-        val player = getPlayer(context)
-        val mediaUri = if (uri.startsWith("/") || uri.startsWith("content://") || uri.startsWith("http")) {
-            Uri.parse(uri)
-        } else {
-            Uri.parse("file://$uri")
+        try {
+            val player = getPlayer(context)
+            val mediaUri = when {
+                uri.startsWith("content://") || uri.startsWith("http://") || uri.startsWith("https://") -> Uri.parse(uri)
+                uri.startsWith("file://") -> Uri.parse(uri)
+                uri.startsWith("/") -> Uri.fromFile(java.io.File(uri))
+                else -> Uri.fromFile(java.io.File(uri))
+            }
+            val mediaItem = MediaItem.fromUri(mediaUri)
+            player.setMediaItem(mediaItem)
+            player.prepare()
+            player.play()
+            _playbackState.value = PlaybackState(
+                uri = uri,
+                title = title,
+                isVideo = isVideo,
+                isPlaying = true,
+                isVisible = true,
+            )
+        } catch (e: Exception) {
+            android.util.Log.e("VidFlow/Player", "Playback error: ${e.message}", e)
         }
-        val mediaItem = MediaItem.fromUri(mediaUri)
-        player.setMediaItem(mediaItem)
-        player.prepare()
-        player.play()
-        _playbackState.value = PlaybackState(
-            uri = uri,
-            title = title,
-            isVideo = isVideo,
-            isPlaying = true,
-            isVisible = true,
-        )
     }
 
     fun togglePlayPause() {
