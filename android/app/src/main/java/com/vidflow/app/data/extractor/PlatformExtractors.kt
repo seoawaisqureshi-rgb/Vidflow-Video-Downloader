@@ -641,6 +641,8 @@ internal class FacebookExtractor(private val client: OkHttpClient) {
             """"browser_native_hd_url":"([^"]+)"""",
             """"hd_src":"([^"]+)"""",
             """"hd_src_no_ratelimit":"([^"]+)"""",
+            """"video_versions":\[\{"url":"([^"]+)"""",
+            """"playback_url":"([^"]+)"""",
         ).firstNotNullOfOrNull { pattern ->
             html.regexFind(pattern)?.unescape()?.replace("\\/", "/")?.takeIf { it.startsWith("http") }
         }
@@ -656,9 +658,10 @@ internal class FacebookExtractor(private val client: OkHttpClient) {
             """<meta property="og:video" content="([^"]+)"""",
             """<meta property="og:video:url" content="([^"]+)"""",
             """<meta property="og:video:secure_url" content="([^"]+)"""",
+            """(https://[^"\\\s]*fbcdn\.net/[^"\\\s]+\.mp4[^"\\\s]*)""",
             """https://video[a-zA-Z0-9.-]+\.fbcdn\.net/[^\s"'\\]+""",
         ).firstNotNullOfOrNull { pattern ->
-            if (pattern.startsWith("https://")) {
+            if (pattern.startsWith("https://") || pattern.startsWith("(https://")) {
                 html.regexFind(pattern, 0)?.unescape()?.replace("\\/", "/")?.takeIf { it.startsWith("http") }
             } else {
                 html.regexFind(pattern)?.replace("&amp;", "&")?.unescape()?.replace("\\/", "/")?.takeIf { it.startsWith("http") }
@@ -691,6 +694,8 @@ class PinterestExtractor(private val client: OkHttpClient) {
                 ?: html.regexFind(""""url":"(https://v[0-9]+\.pinimg\.com/videos/[^"]+\.mp4[^"]*)"""")?.unescape()
                 ?: html.regexFind(""""url":"(https://[^"]+\.pinimg\.com/[^"]+\.mp4[^"]*)"""")?.unescape()
                 ?: html.regexFind(""""contentUrl":"(https://[^"]+pinimg\.com[^"]+\.mp4[^"]*)"""")?.unescape()
+                ?: html.regexFind("""(https://v[0-9]*\.pinimg\.com/[^"\\\s]+\.mp4[^"\\\s]*)""")?.unescape()
+                ?: html.regexFind("""(https://[^"\\\s]*pinimg\.com/[^"\\\s]+\.mp4[^"\\\s]*)""")?.unescape()
                 ?: html.regexFind("""<video[^>]+src="(https?://[^"]+)"""")  
                 ?: html.regexFind("""<source[^>]+src="(https?://[^"]+\.mp4[^"]*)"""")  
                 ?: html.regexFind("""<meta property="og:video" content="([^"]+)"""")  

@@ -62,8 +62,9 @@ import java.net.URLEncoder
 data class PlatformSymbol(
     val name: String,
     val iconColor: Color,
-    val url: String,
+    val url: String = "",
     val isWhatsApp: Boolean = false,
+    val isYouTube: Boolean = false,
 )
 
 @SuppressLint("SetJavaScriptEnabled")
@@ -95,15 +96,8 @@ fun HomeScreen(
 
     val platforms = remember {
         listOf(
-            PlatformSymbol("YouTube", Color(0xFFFF0000), "https://m.youtube.com/"),
+            PlatformSymbol("YouTube", Color(0xFFFF0000), "https://m.youtube.com/", isYouTube = true),
             PlatformSymbol("WhatsApp", Color(0xFF25D366), "", isWhatsApp = true),
-            PlatformSymbol("Facebook", Color(0xFF1877F2), "https://www.facebook.com/"),
-            PlatformSymbol("Instagram", Color(0xFFE1306C), "https://www.instagram.com/"),
-            PlatformSymbol("TikTok", Color(0xFF00F2FE), "https://www.tiktok.com/"),
-            PlatformSymbol("Pinterest", Color(0xFFBD081C), "https://www.pinterest.com/"),
-            PlatformSymbol("X", Color(0xFF000000), "https://x.com/"),
-            PlatformSymbol("Dailymotion", Color(0xFF0066DC), "https://www.dailymotion.com/"),
-            PlatformSymbol("Threads", Color(0xFF181818), "https://www.threads.net/"),
         )
     }
 
@@ -252,19 +246,11 @@ fun HomeScreen(
                                 val input = state.urlInput.trim()
                                 if (input.startsWith("http://") || input.startsWith("https://")) {
                                     val lower = input.lowercase()
-                                    // Social media links: process directly without breaking the in-app browser
-                                    val isSocialMediaLink = lower.contains("instagram.com") || lower.contains("instagr.am") ||
-                                        lower.contains("tiktok.com") || lower.contains("facebook.com") || lower.contains("fb.watch") ||
-                                        lower.contains("pinterest.com") || lower.contains("pin.it") || lower.contains("twitter.com") ||
-                                        lower.contains("x.com") || lower.contains("reddit.com") || lower.contains("vimeo.com")
-
-                                    if (isSocialMediaLink) {
-                                        viewModel.fetchInfo()
-                                    } else {
+                                    if (lower.contains("youtube.com") || lower.contains("youtu.be")) {
                                         requestedBrowserUrl = input
                                         currentBrowserUrl = input
-                                        viewModel.fetchInfo()
                                     }
+                                    viewModel.fetchInfo()
                                 } else if (input.isNotBlank()) {
                                     val searchUrl = "https://m.youtube.com/results?search_query=" +
                                         URLEncoder.encode(input, "UTF-8")
@@ -291,13 +277,13 @@ fun HomeScreen(
                         items(platforms) { platform ->
                             PlatformShortcutCard(
                                 symbol = platform,
-                                isSelected = currentBrowserUrl.contains(platform.name.lowercase()),
+                                isSelected = platform.isYouTube && currentBrowserUrl.contains("youtube.com"),
                                 onClick = {
                                     if (platform.isWhatsApp) {
                                         onOpenWhatsAppSaver()
-                                    } else {
-                                        requestedBrowserUrl = platform.url
-                                        currentBrowserUrl = platform.url
+                                    } else if (platform.isYouTube) {
+                                        requestedBrowserUrl = "https://m.youtube.com/"
+                                        currentBrowserUrl = "https://m.youtube.com/"
                                     }
                                 }
                             )
@@ -524,31 +510,36 @@ fun HomeScreen(
                                         return true
                                     }
 
-                                    // Prevent external app takeovers (Threads app, Instagram app, Facebook app, TikTok app)
-                                    // When returning false, Android OS Digital Asset Links can launch the native app if installed.
-                                    // Explicitly calling view.loadUrl and returning true FORCES WebView to keep browsing inside VidFlow!
-                                    if (scheme == "http" || scheme == "https") {
-                                        val isSocialApp = host.contains("threads.net") || host.contains("instagram.com") ||
-                                            host.contains("facebook.com") || host.contains("tiktok.com") || host.contains("pinterest.com")
+                                    // The in-app browser is dedicated exclusively to YouTube.
+                                    // Social platforms (Facebook, Instagram, TikTok, Pinterest, Threads, Dailymotion)
+                                    // are download-only. If any link points to them, send to downloader and stay on YouTube!
+                                    val isSocialPlatform = host.contains("facebook.com") || host.contains("instagram.com") ||
+                                        host.contains("tiktok.com") || host.contains("pinterest.com") ||
+                                        host.contains("threads.net") || host.contains("dailymotion.com")
 
-                                        if (isSocialApp && urlStr != view.url && urlStr != currentBrowserUrl) {
-                                            currentBrowserUrl = urlStr
-                                            view.loadUrl(urlStr)
-                                            return true
-                                        }
-                                        return false
+                                    if (isSocialPlatform) {
+                                        viewModel.onUrlChanged(urlStr)
+                                        viewModel.fetchInfo()
+                                        return true
+                                    }
+
+                                    if (scheme == "http" || scheme == "https") {
+                                        return false // Allow normal YouTube browsing inside WebView
                                     }
 
                                     // Intent schemes: do NOT kick user out to external apps.
-                                    // Extract fallback web URL if present, or stay in WebView.
                                     if (scheme == "intent" || urlStr.startsWith("intent://")) {
                                         try {
                                             val parsedIntent = Intent.parseUri(urlStr, Intent.URI_INTENT_SCHEME)
                                             val fallback = parsedIntent.getStringExtra("browser_fallback_url")
                                                 ?: parsedIntent.dataString?.takeIf { it.startsWith("http") }
                                             if (!fallback.isNullOrBlank()) {
-                                                currentBrowserUrl = fallback
-                                                view.loadUrl(fallback)
+                                                val fallbackHost = Uri.parse(fallback).host?.lowercase() ?: ""
+                                                if (!fallbackHost.contains("facebook.com") && !fallbackHost.contains("instagram.com") &&
+                                                    !fallbackHost.contains("tiktok.com") && !fallbackHost.contains("threads.net")) {
+                                                    currentBrowserUrl = fallback
+                                                    view.loadUrl(fallback)
+                                                }
                                                 return true
                                             }
                                         } catch (_: Exception) {}
@@ -556,7 +547,7 @@ fun HomeScreen(
                                     }
 
                                     // Custom app schemes (e.g. threads://, barcelona://, instagram://, fb://, tiktok://, snssdk1233://, pinterest://):
-                                    // Never launch external app! Keep the user inside VidFlow without crashing.
+                                    // Never launch external app!
                                     return true
                                 }
 
@@ -744,6 +735,7 @@ fun HomeScreen(
             }
         )
     }
+
 }
 
 @Composable

@@ -32,10 +32,6 @@ fun SettingsScreen(
     val prefs = remember { context.getSharedPreferences("vidflow_settings", Context.MODE_PRIVATE) }
 
     var wifiOnly by remember { mutableStateOf(prefs.getBoolean("wifi_only", false)) }
-    var language by remember { mutableStateOf(prefs.getString("app_language", "English") ?: "English") }
-    var rememberedFileManager by remember { mutableStateOf(FileManagerHelper.getRememberedPackage(context)) }
-
-    var showLanguageDialog by remember { mutableStateOf(false) }
     var showAboutDialog by remember { mutableStateOf(false) }
 
     Scaffold(
@@ -75,6 +71,7 @@ fun SettingsScreen(
                             icon = Icons.Rounded.Folder,
                             title = "Download Location",
                             subtitle = "Downloads/VidFlow (Internal Storage)",
+                            showChevron = false,
                             onClick = {
                                 Toast.makeText(context, "Saved to standard Downloads/VidFlow directory", Toast.LENGTH_SHORT).show()
                             }
@@ -89,41 +86,6 @@ fun SettingsScreen(
                                 wifiOnly = it
                                 prefs.edit().putBoolean("wifi_only", it).apply()
                             }
-                        )
-                    }
-                }
-            }
-
-            item {
-                SectionHeader("App & Storage Settings")
-                Surface(
-                    color = Surface,
-                    shape = RoundedCornerShape(18.dp),
-                    tonalElevation = 2.dp,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Column {
-                        val fileAppSubtitle = when {
-                            FileManagerHelper.isSamsungMyFilesInstalled(context) -> "Samsung My Files (Auto-detected)"
-                            rememberedFileManager != null -> "Remembered: $rememberedFileManager"
-                            else -> "Prompt each time (System chooser)"
-                        }
-                        SettingsRow(
-                            icon = Icons.Rounded.FolderShared,
-                            title = "File Manager Preference",
-                            subtitle = fileAppSubtitle,
-                            onClick = {
-                                FileManagerHelper.resetRememberedChoice(context)
-                                rememberedFileManager = null
-                                Toast.makeText(context, "Remembered file manager app reset. You will be asked next time.", Toast.LENGTH_SHORT).show()
-                            }
-                        )
-                        HorizontalDivider(color = Outline, thickness = 0.5.dp, modifier = Modifier.padding(horizontal = 16.dp))
-                        SettingsRow(
-                            icon = Icons.Rounded.Language,
-                            title = "Language",
-                            subtitle = language,
-                            onClick = { showLanguageDialog = true }
                         )
                     }
                 }
@@ -148,41 +110,6 @@ fun SettingsScreen(
                 }
             }
         }
-    }
-
-    // Language Picker Dialog
-    if (showLanguageDialog) {
-        val languages = listOf("English", "Urdu (اردو)", "Hindi (हिंदी)", "Spanish (Español)", "Arabic (العربية)")
-        AlertDialog(
-            onDismissRequest = { showLanguageDialog = false },
-            title = { Text("Select Language") },
-            text = {
-                Column {
-                    languages.forEach { lang ->
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable {
-                                    language = lang
-                                    prefs.edit().putString("app_language", lang).apply()
-                                    showLanguageDialog = false
-                                    Toast.makeText(context, "Language set to $lang", Toast.LENGTH_SHORT).show()
-                                }
-                                .padding(vertical = 12.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            RadioButton(selected = language == lang, onClick = null)
-                            Spacer(Modifier.width(8.dp))
-                            Text(lang, color = TextPrimary)
-                        }
-                    }
-                }
-            },
-            confirmButton = {},
-            dismissButton = {
-                TextButton(onClick = { showLanguageDialog = false }) { Text("Cancel") }
-            }
-        )
     }
 
     // About Dialog
@@ -226,6 +153,7 @@ private fun SettingsRow(
     icon: ImageVector,
     title: String,
     subtitle: String,
+    showChevron: Boolean = true,
     onClick: () -> Unit,
 ) {
     Row(
@@ -242,7 +170,9 @@ private fun SettingsRow(
             Spacer(Modifier.height(2.dp))
             Text(subtitle, style = MaterialTheme.typography.bodySmall, color = TextSecondary)
         }
-        Icon(Icons.Rounded.ChevronRight, contentDescription = null, tint = TextMuted)
+        if (showChevron) {
+            Icon(Icons.Rounded.ChevronRight, contentDescription = null, tint = TextMuted)
+        }
     }
 }
 

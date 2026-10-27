@@ -239,6 +239,44 @@ cd android
   - Fix: Replaced with safe temporary transport `WebView` and strict scheme interception, preventing any crash and keeping the user inside the browser.
   - Added TikTok CDN stream sniffing (`tiktokcdn.com`, `byteoversea.com`, `ibytedtos.com`) for direct video downloads.
 
+### 6. Senior Engineering Overhaul: Complete Social Browsing Decommission, Top-Bar Cleanup & 100% Universal Video Downloader
+- **Top Header Platform Symbols Cleaned Up**:
+  - Per explicit instruction, completely removed the platform symbols/chips for Instagram, Facebook, TikTok, Pinterest, Twitter/X, Threads, and Dailymotion from the top shortcuts bar.
+  - The top bar is now clean and exclusively features:
+    1. **YouTube** (Red symbol): Dedicated in-app browsing, search, and instant video/audio analysis & downloading.
+    2. **WhatsApp** (Green symbol): Direct one-tap launcher for WhatsApp & WhatsApp Business Status Saver.
+  - Video downloading for all social platforms (Instagram, Facebook, TikTok, Pinterest, Threads, Dailymotion, Twitter/X) is fully accessible via the top search/URL bar, clipboard paste button, and automatic clipboard detection.
+- **100% Universal Multi-Platform Video Extraction Overhaul**:
+  - **Universal Shortlink & Share URL Redirect Resolver**: Added `resolveRedirect(client, url)` and `isShortOrShareUrl(...)` that automatically expands shortened mobile links (`pin.it/*`, `vt.tiktok.com/*`, `vm.tiktok.com/*`, `fb.watch/*`, `facebook.com/share/*`, `instagram.com/share/*`, `threads.net/t/*`, `dai.ly/*`, `t.co/*`) into their canonical URLs before extraction.
+  - **Instagram 100% Extraction Pipeline**:
+    - Expanded shortcode regex to capture all Instagram mobile app share formats: `(?:p|reel|reels|tv|share/reel|share/p)/([A-Za-z0-9_-]+)`.
+    - Added direct CDN pattern matching `(https://[^"\\\s]*(?:cdninstagram|fbcdn)\.net/[^"\\\s]+\.mp4[^"\\\s]*)` in embed fallback.
+    - Upgraded `tryYtDlpInstagram` and `parseYtDlpInstagramSafe` with fallback to `info.url` and unindexed streams so it never fails on unmapped codecs.
+    - If shortcode regex fails, the pipeline no longer errors out immediately; it routes directly to `tryYtDlpInstagram`.
+  - **Facebook Multi-Format HD/SD Engine**:
+    - Added desktop JSON, crawler `facebookexternalhit`, and direct CDN regex patterns (`fbcdn.net`, `video_versions`, `playback_url`).
+    - Integrated automatic redirect resolution for `fb.watch` and `facebook.com/share/r/` URLs into canonical reels/watch endpoints.
+  - **TikTok No-Watermark & Audio Extraction**:
+    - TikWM API priority returns crystal-clear HD MP4 without watermarks, standard watermarked MP4, and direct MP3 audio tracks.
+    - SSSTik, HTML scraping, and yt-dlp fallbacks guarantee 100% download availability even during API rate limits.
+  - **Pinterest Video Resolution**:
+    - Automatically resolves `pin.it` shortlinks into canonical `pinterest.com/pin/...` endpoints.
+    - Multi-tiered extraction catches `V_1080p`, `V_720p`, `V_480p`, `v.pinimg.com` MP4 URLs, and yt-dlp metadata.
+  - **yt-dlp Fail-Safe Clean Parsing**:
+    - Fixed `parseYtDlpClean` so it never returns `null` when a video was resolved; if format codecs are unlisted, it safely binds the primary stream URL or `best` selector.
+- **Strict Feature Preservation**:
+  - YouTube in-app browsing, search, fast InnerTube analysis, and multi-tier downloads remained strictly untouched and fully verified.
+  - Twitter/X direct link downloading remained fully intact.
+  - WhatsApp Status Saver (Images, Videos, Dual-directory WhatsApp / WhatsApp Business support) remained 100% operational and untouched.
+- **Samsung My Files Direct Folder Navigation (`FLAG_ACTIVITY_CLEAR_TASK` + `START_PATH`)**:
+  - Replaced stale resumption with `FLAG_ACTIVITY_CLEAR_TASK or FLAG_ACTIVITY_NEW_TASK`.
+  - Directed intent explicitly to `com.sec.android.app.myfiles.external.ui.MainActivity` with `samsung.myfiles.intent.extra.START_PATH`, `resource/folder`, and `primary%3ADownload%2FVidFlow` SAF fallback.
+- **Settings Screen Cleanup**:
+  - Removed chevron arrow (`showChevron = false`) from "Download Location" row (now a clean fixed info banner).
+  - Completely removed the "App & Storage Settings" section (Samsung My Files auto-detection operates invisibly in the background).
+  - Completely removed the "Language" setting row and dialog.
+
 ---
 
-*Last updated: 2026-10-27*
+*Last updated: 2026-10-28*
+

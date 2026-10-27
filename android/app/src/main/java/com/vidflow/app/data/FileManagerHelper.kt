@@ -77,36 +77,63 @@ object FileManagerHelper {
         if (!target.exists()) target.mkdirs()
         val path = target.absolutePath
 
-        // 1. Samsung My Files check with specific folder targets
+        // 1. Samsung My Files check with specific folder targets and CLEAR_TASK
         if (isSamsungMyFilesInstalled(context)) {
+            val folderUri = Uri.fromFile(target)
+            val docUri = Uri.parse("content://com.android.externalstorage.documents/document/primary%3ADownload%2FVidFlow")
             val intents = listOf(
+                // A. Direct Samsung My Files External UI MainActivity with START_PATH & resource/folder
+                Intent(Intent.ACTION_VIEW).apply {
+                    setPackage(SAMSUNG_MY_FILES_PACKAGE)
+                    component = android.content.ComponentName(
+                        SAMSUNG_MY_FILES_PACKAGE,
+                        "com.sec.android.app.myfiles.external.ui.MainActivity"
+                    )
+                    setDataAndType(folderUri, "resource/folder")
+                    putExtra("samsung.myfiles.intent.extra.START_PATH", path)
+                    putExtra(Intent.EXTRA_ORIGINATING_URI, folderUri)
+                    putExtra("folder_path", path)
+                    putExtra("startDir", path)
+                    putExtra("folderPath", path)
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
+                },
+                // B. Storage Access Framework directory URI targeting Samsung My Files
+                Intent(Intent.ACTION_VIEW).apply {
+                    setPackage(SAMSUNG_MY_FILES_PACKAGE)
+                    setDataAndType(docUri, "vnd.android.document/directory")
+                    putExtra("samsung.myfiles.intent.extra.START_PATH", path)
+                    putExtra("folder_path", path)
+                    putExtra("startDir", path)
+                    putExtra("current_path", path)
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
+                },
+                // C. Samsung LAUNCH_MY_FILES with official START_PATH extra
                 Intent("samsung.myfiles.intent.action.LAUNCH_MY_FILES").apply {
                     setPackage(SAMSUNG_MY_FILES_PACKAGE)
+                    setDataAndType(folderUri, "resource/folder")
+                    putExtra("samsung.myfiles.intent.extra.START_PATH", path)
                     putExtra("sKey", path)
                     putExtra("folder_path", path)
                     putExtra("startDir", path)
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
                 },
-                Intent(Intent.ACTION_VIEW).apply {
-                    setPackage(SAMSUNG_MY_FILES_PACKAGE)
-                    val uri = Uri.parse("content://com.android.externalstorage.documents/document/primary%3ADownload%2FVidFlow")
-                    setDataAndType(uri, "vnd.android.document/directory")
-                    putExtra("folder_path", path)
-                    putExtra("startDir", path)
-                    putExtra("current_path", path)
-                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
-                },
+                // D. Samsung VIEW_FOLDER action
                 Intent("com.sec.android.app.myfiles.VIEW_FOLDER").apply {
                     setPackage(SAMSUNG_MY_FILES_PACKAGE)
+                    putExtra("samsung.myfiles.intent.extra.START_PATH", path)
                     putExtra("folder_path", path)
                     putExtra("startDir", path)
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
                 },
+                // E. Samsung Package Launch Intent with action VIEW and START_PATH
                 context.packageManager.getLaunchIntentForPackage(SAMSUNG_MY_FILES_PACKAGE)?.apply {
+                    action = Intent.ACTION_VIEW
+                    setDataAndType(folderUri, "resource/folder")
+                    putExtra("samsung.myfiles.intent.extra.START_PATH", path)
                     putExtra("folder_path", path)
                     putExtra("startDir", path)
                     putExtra("current_path", path)
-                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TASK)
                 }
             )
 

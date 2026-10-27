@@ -38,7 +38,12 @@ class VideoExtractor(
     }
 
     suspend fun extract(rawUrl: String): Result {
-        val url = normalizeUrl(rawUrl.trim())
+        val normalized = normalizeUrl(rawUrl.trim())
+        val url = if (isShortOrShareUrl(normalized)) {
+            kotlinx.coroutines.withContext(Dispatchers.IO) { resolveRedirect(client, normalized) }
+        } else {
+            normalized
+        }
         return when (Platform.fromUrl(url)) {
             Platform.YOUTUBE     -> YoutubeExtractor(client, context).extract(url)
             Platform.TIKTOK      -> orderedChain(url, Platform.TIKTOK) { TikTokExtractor(client).extract(url) }
@@ -132,13 +137,12 @@ class VideoExtractor(
         val isStory = url.contains("/stories/", ignoreCase = true) ||
             url.contains("/story/", ignoreCase = true)
         if (!isStory) {
-            val shortcode = url.regexFind("""/(p|reel|reels|tv)/([A-Za-z0-9_-]+)""", 2)
-                ?: return Result.Error("Invalid Instagram URL. Please use a direct post, reel, or video link.")
+            val shortcode = url.regexFind("""/(?:p|reel|reels|tv|share/reel|share/p)/([A-Za-z0-9_-]+)""", 1)
             val result = orderedChain(url, Platform.INSTAGRAM) {
                 InstagramExtractor(client).extract(url)
                     .takeIf { it is Result.Success }
-                    ?: tryInstagramAppApi(url, shortcode)
-                    ?: tryInstagramEmbed(url, shortcode)
+                    ?: (shortcode?.let { tryInstagramAppApi(url, it) })
+                    ?: (shortcode?.let { tryInstagramEmbed(url, it) })
                     ?: Result.Error("Could not extract this Instagram post.")
             }
             if (result is Result.Success) return result
@@ -242,6 +246,7 @@ class VideoExtractor(
                 ?: html.regexFind("""<meta property="og:video" content="([^"]+)"""")
                 ?: html.regexFind("""<meta property="og:video:url" content="([^"]+)"""")
                 ?: html.regexFind("""VideoObject","contentUrl":"([^"]+)""")?.unescape()
+                ?: html.regexFind("""(https://[^"\\\s]*(?:cdninstagram|fbcdn)\.net/[^"\\\s]+\.mp4[^"\\\s]*)""")?.unescape()
                 ?: return null
 
             val title = html.regexFind(""""accessibility_caption":"([^"]+)""")?.take(60)
@@ -299,13 +304,15 @@ class VideoExtractor(
         info: com.yausername.youtubedl_android.mapper.VideoInfo,
     ): Result? {
         val title = info.title ?: "Instagram Video"
-        val allFormats = info.formats ?: return null
+        val allFormats = info.formats ?: emptyList()
 
         // Find the best combined format to get metadata (thumbnail, quality)
         val bestCombined = allFormats
             .filter { (it.vcodec ?: "none") != "none" && (it.acodec ?: "none") != "none" }
             .maxByOrNull { it.height ?: 0 }
         val bestUrl = bestCombined?.url?.takeIf { it.isNotEmpty() }
+            ?: info.url?.takeIf { it.isNotEmpty() }
+            ?: allFormats.firstOrNull { !it.url.isNullOrEmpty() }?.url
 
         val formats = mutableListOf<VideoFormat>()
 
@@ -628,7 +635,24 @@ class VideoExtractor(
             }
         }
 
-        if (formats.isEmpty()) return null
+        if (formats.isEmpty()) {
+            val singleDirect = info.url?.takeIf { it.isNotEmpty() }
+                ?: allFormats.firstOrNull { !it.url.isNullOrEmpty() }?.url
+            if (singleDirect != null) {
+                formats.add(VideoFormat(
+                    formatId = "best", quality = "Best Quality", ext = "mp4",
+                    filesize = null, fps = 30, vcodec = "h264", acodec = "aac",
+                    hasVideo = true, hasAudio = true, downloadUrl = singleDirect, needsYtDlp = false
+                ))
+            } else {
+                formats.add(VideoFormat(
+                    formatId = "best", quality = "Best Quality", ext = "mp4",
+                    filesize = null, fps = 30, vcodec = "h264", acodec = "aac",
+                    hasVideo = true, hasAudio = true, downloadUrl = "",
+                    needsYtDlp = true, ytDlpFormatSelector = "best"
+                ))
+            }
+        }
 
         return Result.Success(VideoInfo(
             url = originalUrl, title = title, thumbnail = info.thumbnail,
@@ -663,6 +687,38 @@ class VideoExtractor(
             u = u.replace("threads.net", "threads.com")
         }
         return u
+    }
+
+    companion object {
+        fun isShortOrShareUrl(url: String): Boolean {
+            val lower = url.lowercase()
+            return lower.contains("pin.it/") ||
+                   lower.contains("vt.tiktok.com/") ||
+                   lower.contains("vm.tiktok.com/") ||
+                   lower.contains("fb.watch/") ||
+                   lower.contains("facebook.com/share/") ||
+                   lower.contains("instagram.com/share/") ||
+                   lower.contains("threads.net/t/") ||
+                   lower.contains("threads.com/t/") ||
+                   lower.contains("dai.ly/") ||
+                   lower.contains("t.co/") ||
+                   lower.contains("bit.ly/") ||
+                   lower.contains("tinyurl.com/")
+        }
+
+        fun resolveRedirect(client: OkHttpClient, url: String): String {
+            return try {
+                val req = Request.Builder()
+                    .url(url)
+                    .header("User-Agent", "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36")
+                    .build()
+                client.newCall(req).execute().use { response ->
+                    response.request.url.toString()
+                }
+            } catch (_: Exception) {
+                url
+            }
+        }
     }
 }
 
