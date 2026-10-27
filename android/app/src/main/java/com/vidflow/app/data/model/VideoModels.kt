@@ -56,6 +56,7 @@ enum class Platform(val displayName: String, val domains: List<String>) {
     DAILYMOTION("Dailymotion", listOf("dailymotion.com", "dai.ly")),
     PINTEREST("Pinterest", listOf("pinterest.com", "pin.it", "pinterest.co.uk", "pinterest.fr", "pinterest.ca", "pinterest.de")),
     THREADS("Threads", listOf("threads.net", "www.threads.net", "threads.com", "www.threads.com")),
+    WHATSAPP("WhatsApp", listOf("whatsapp.com")),
     UNKNOWN("Unknown", emptyList());
 
     companion object {

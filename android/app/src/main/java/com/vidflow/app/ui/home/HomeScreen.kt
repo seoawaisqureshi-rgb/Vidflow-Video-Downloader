@@ -6,7 +6,6 @@ import android.content.Intent
 import android.graphics.Bitmap
 import android.net.Uri
 import android.webkit.CookieManager
-import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
@@ -47,8 +46,10 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import coil.compose.AsyncImage
 import com.vidflow.app.data.extractor.WebViewDetector
+import com.vidflow.app.data.model.Platform
 import com.vidflow.app.data.model.VideoFormat
 import com.vidflow.app.data.model.VideoInfo
+import com.vidflow.app.service.DownloadService
 import com.vidflow.app.theme.*
 import com.vidflow.app.ui.components.FormatLabels
 import java.net.URLEncoder
@@ -83,6 +84,8 @@ fun HomeScreen(
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
     var isBrowserLoading by remember { mutableStateOf(false) }
     var detectedVideoOnPage by remember { mutableStateOf<String?>(null) }
+    var interceptedMediaUrl by remember { mutableStateOf<String?>(null) }
+    var fallbackVideoInfo by remember { mutableStateOf<VideoInfo?>(null) }
     var showQualityPickerDialog by remember { mutableStateOf(false) }
 
     val platforms = remember {
@@ -91,7 +94,7 @@ fun HomeScreen(
             PlatformSymbol("WhatsApp", Color(0xFF25D366), "", isWhatsApp = true),
             PlatformSymbol("Facebook", Color(0xFF1877F2), "https://m.facebook.com/"),
             PlatformSymbol("Instagram", Color(0xFFE1306C), "https://www.instagram.com/"),
-            PlatformSymbol("TikTok", Color(0xFF00F2FE), "https://www.tiktok.com/explore"),
+            PlatformSymbol("TikTok", Color(0xFF00F2FE), "https://www.tiktok.com/"),
             PlatformSymbol("Pinterest", Color(0xFFBD081C), "https://www.pinterest.com/"),
             PlatformSymbol("X", Color(0xFF000000), "https://x.com/"),
             PlatformSymbol("Dailymotion", Color(0xFF0066DC), "https://www.dailymotion.com/"),
@@ -101,6 +104,7 @@ fun HomeScreen(
 
     val detector = remember {
         WebViewDetector { video ->
+            interceptedMediaUrl = video.url
             detectedVideoOnPage = video.url
         }
     }
@@ -125,8 +129,43 @@ fun HomeScreen(
     // Auto-open quality picker dialog when video info is extracted
     LaunchedEffect(state.videoInfo) {
         if (state.videoInfo != null) {
+            fallbackVideoInfo = null
             showQualityPickerDialog = true
         }
+    }
+
+    // Handle extraction error: if direct stream was intercepted, offer direct download fallback!
+    LaunchedEffect(state.error) {
+        val err = state.error ?: return@LaunchedEffect
+        val liveUrl = webViewRef?.url?.takeIf { it.isNotBlank() } ?: currentBrowserUrl
+        if (!interceptedMediaUrl.isNullOrBlank()) {
+            fallbackVideoInfo = VideoInfo(
+                url = liveUrl,
+                title = currentBrowserTitle.ifBlank { "Detected Video" },
+                thumbnail = null,
+                duration = null,
+                uploader = null,
+                platform = Platform.fromUrl(liveUrl),
+                formats = listOf(
+                    VideoFormat(
+                        formatId = "direct_mp4",
+                        quality = "HD Video (Direct MP4)",
+                        ext = "mp4",
+                        filesize = null,
+                        fps = 30,
+                        vcodec = "h264",
+                        acodec = "aac",
+                        hasVideo = true,
+                        hasAudio = true,
+                        downloadUrl = interceptedMediaUrl!!,
+                    )
+                ),
+            )
+            showQualityPickerDialog = true
+        } else {
+            Toast.makeText(context, err, Toast.LENGTH_LONG).show()
+        }
+        viewModel.dismissError()
     }
 
     // Clipboard listener that protects against re-analyzing active jobs
@@ -164,7 +203,7 @@ fun HomeScreen(
                         OutlinedTextField(
                             value = state.urlInput,
                             onValueChange = viewModel::onUrlChanged,
-                            placeholder = { Text("Search YouTube or enter URL...", color = TextMuted, fontSize = 13.sp) },
+                            placeholder = { Text("Search YouTube or paste any link...", color = TextMuted, fontSize = 13.sp) },
                             leadingIcon = {
                                 Icon(Icons.Rounded.Search, contentDescription = null, tint = Accent)
                             },
@@ -180,8 +219,6 @@ fun HomeScreen(
                                         if (!clean.isNullOrBlank()) {
                                             viewModel.onUrlChanged(clean)
                                             keyboard?.hide()
-                                            requestedBrowserUrl = clean
-                                            currentBrowserUrl = clean
                                             viewModel.fetchInfo()
                                         } else {
                                             Toast.makeText(context, "No URL in clipboard", Toast.LENGTH_SHORT).show()
@@ -209,9 +246,20 @@ fun HomeScreen(
                                 keyboard?.hide()
                                 val input = state.urlInput.trim()
                                 if (input.startsWith("http://") || input.startsWith("https://")) {
-                                    requestedBrowserUrl = input
-                                    currentBrowserUrl = input
-                                    viewModel.fetchInfo()
+                                    val lower = input.lowercase()
+                                    // Social media links: process directly without breaking the in-app browser
+                                    val isSocialMediaLink = lower.contains("instagram.com") || lower.contains("instagr.am") ||
+                                        lower.contains("tiktok.com") || lower.contains("facebook.com") || lower.contains("fb.watch") ||
+                                        lower.contains("pinterest.com") || lower.contains("pin.it") || lower.contains("twitter.com") ||
+                                        lower.contains("x.com") || lower.contains("reddit.com") || lower.contains("vimeo.com")
+
+                                    if (isSocialMediaLink) {
+                                        viewModel.fetchInfo()
+                                    } else {
+                                        requestedBrowserUrl = input
+                                        currentBrowserUrl = input
+                                        viewModel.fetchInfo()
+                                    }
                                 } else if (input.isNotBlank()) {
                                     val searchUrl = "https://m.youtube.com/results?search_query=" +
                                         URLEncoder.encode(input, "UTF-8")
@@ -236,18 +284,15 @@ fun HomeScreen(
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         items(platforms) { platform ->
-                            val isSelected = currentBrowserUrl.contains(platform.name, ignoreCase = true)
                             PlatformShortcutCard(
                                 symbol = platform,
-                                isSelected = isSelected,
+                                isSelected = currentBrowserUrl.contains(platform.name.lowercase()),
                                 onClick = {
-                                    when {
-                                        platform.isWhatsApp -> onOpenWhatsAppSaver()
-                                        else -> {
-                                            requestedBrowserUrl = platform.url
-                                            currentBrowserUrl = platform.url
-                                            detectedVideoOnPage = null
-                                        }
+                                    if (platform.isWhatsApp) {
+                                        onOpenWhatsAppSaver()
+                                    } else {
+                                        requestedBrowserUrl = platform.url
+                                        currentBrowserUrl = platform.url
                                     }
                                 }
                             )
@@ -281,8 +326,6 @@ fun HomeScreen(
                         )
                         Spacer(Modifier.width(6.dp))
                         TextButton(onClick = {
-                            requestedBrowserUrl = clipUrl
-                            currentBrowserUrl = clipUrl
                             viewModel.acceptClipboardUrl()
                             viewModel.fetchInfo()
                         }) {
@@ -316,41 +359,22 @@ fun HomeScreen(
                                 setSupportZoom(true)
                                 builtInZoomControls = true
                                 displayZoomControls = false
-                                setSupportMultipleWindows(true)
+                                setSupportMultipleWindows(false) // Single window prevents popup traps & white screens
                                 javaScriptCanOpenWindowsAutomatically = true
                                 mixedContentMode = android.webkit.WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
-                                // Clean modern Chrome Android user agent to prevent bot/webview blockage on TikTok, X, IG, FB
-                                userAgentString = "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36"
+                                allowFileAccess = true
+                                allowContentAccess = true
+                                loadWithOverviewMode = true
+                                useWideViewPort = true
+
+                                // Strip '; wv' and 'Version/4.0' from default WebView UA so platforms treat it as native Chrome
+                                val defaultUa = userAgentString
+                                userAgentString = defaultUa.replace("; wv", "").replace("Version/4.0 ", "")
                             }
 
                             val cookieManager = CookieManager.getInstance()
                             cookieManager.setAcceptCookie(true)
                             cookieManager.setAcceptThirdPartyCookies(this, true)
-
-                            webChromeClient = object : WebChromeClient() {
-                                override fun onCreateWindow(
-                                    view: WebView?,
-                                    isDialog: Boolean,
-                                    isUserGesture: Boolean,
-                                    resultMsg: android.os.Message?
-                                ): Boolean {
-                                    val transport = resultMsg?.obj as? WebView.WebViewTransport ?: return false
-                                    val tempWebView = WebView(view?.context ?: return false).apply {
-                                        webViewClient = object : WebViewClient() {
-                                            override fun shouldOverrideUrlLoading(v: WebView?, req: WebResourceRequest?): Boolean {
-                                                val targetUrl = req?.url?.toString()
-                                                if (!targetUrl.isNullOrBlank()) {
-                                                    view?.loadUrl(targetUrl)
-                                                }
-                                                return true
-                                            }
-                                        }
-                                    }
-                                    transport.webView = tempWebView
-                                    resultMsg.sendToTarget()
-                                    return true
-                                }
-                            }
 
                             webViewClient = object : WebViewClient() {
                                 override fun onPageStarted(view: WebView?, url: String?, favicon: Bitmap?) {
@@ -399,6 +423,24 @@ fun HomeScreen(
                                     }
                                 }
 
+                                override fun doUpdateVisitedHistory(view: WebView?, url: String?, isReload: Boolean) {
+                                    super.doUpdateVisitedHistory(view, url, isReload)
+                                    if (url != null) {
+                                        currentBrowserUrl = url
+                                        val title = view?.title
+                                        if (!title.isNullOrBlank()) currentBrowserTitle = title
+                                        val lower = url.lowercase()
+                                        if (lower.contains("watch?v=") || lower.contains("/shorts/") ||
+                                            lower.contains("/reel/") || lower.contains("/p/") ||
+                                            lower.contains("/video/") || lower.contains("/status/") ||
+                                            lower.contains("/pin/") || lower.contains("fb.watch") ||
+                                            lower.contains("story_fbid")
+                                        ) {
+                                            detectedVideoOnPage = url
+                                        }
+                                    }
+                                }
+
                                 override fun shouldOverrideUrlLoading(
                                     view: WebView,
                                     request: WebResourceRequest,
@@ -406,6 +448,12 @@ fun HomeScreen(
                                     val uri = request.url ?: return false
                                     val urlStr = uri.toString()
                                     val scheme = uri.scheme?.lowercase() ?: ""
+                                    val host = uri.host?.lowercase() ?: ""
+
+                                    // Block redirects to Play Store or market inside WebView
+                                    if (scheme == "market" || host.contains("play.google.com") || urlStr.contains("play.google.com")) {
+                                        return true
+                                    }
 
                                     if (scheme == "http" || scheme == "https") {
                                         return false
@@ -415,10 +463,13 @@ fun HomeScreen(
                                     if (scheme == "intent" || urlStr.startsWith("intent://")) {
                                         try {
                                             val parsedIntent = Intent.parseUri(urlStr, Intent.URI_INTENT_SCHEME)
-                                            val fallback = parsedIntent.getStringExtra("browser_fallback_url")
-                                            if (!fallback.isNullOrBlank()) {
-                                                view.loadUrl(fallback)
-                                                return true
+                                            val pkg = parsedIntent.`package`
+                                            if (!pkg.isNullOrBlank()) {
+                                                val launchIntent = view.context.packageManager.getLaunchIntentForPackage(pkg)
+                                                if (launchIntent != null) {
+                                                    view.context.startActivity(launchIntent)
+                                                    return true
+                                                }
                                             }
                                             val dataUri = parsedIntent.data
                                             if (dataUri != null && (dataUri.scheme == "http" || dataUri.scheme == "https")) {
@@ -429,7 +480,24 @@ fun HomeScreen(
                                         return true
                                     }
 
-                                    // Block non-http app schemes (threads://, barcelona://, snssdk://, tiktok://, fb://, etc.)
+                                    // If custom app scheme (e.g. instagram://, tiktok://, fb://), launch native app if installed
+                                    val appPkg = when (scheme) {
+                                        "instagram" -> "com.instagram.android"
+                                        "fb" -> "com.facebook.katana"
+                                        "tiktok", "snssdk1233", "snssdk1180" -> "com.zhiliaoapp.musically"
+                                        "twitter" -> "com.twitter.android"
+                                        "pinterest" -> "com.pinterest"
+                                        else -> null
+                                    }
+                                    if (appPkg != null) {
+                                        val launchIntent = view.context.packageManager.getLaunchIntentForPackage(appPkg)
+                                        if (launchIntent != null) {
+                                            try {
+                                                view.context.startActivity(launchIntent)
+                                            } catch (_: Exception) {}
+                                        }
+                                    }
+
                                     return true
                                 }
 
@@ -479,30 +547,48 @@ fun HomeScreen(
                         .align(Alignment.BottomCenter)
                         .padding(bottom = 16.dp)
                         .clickable {
-                            // Extract running video or page URL via Javascript
-                            webViewRef?.evaluateJavascript(
-                                """
-                                (function() {
-                                    var v = document.querySelector('video');
-                                    var vSrc = (v && v.currentSrc) ? v.currentSrc : (v ? v.src : '');
-                                    return JSON.stringify({
-                                        url: window.location.href,
-                                        videoSrc: vSrc
-                                    });
-                                })()
-                                """.trimIndent()
-                            ) { jsResult ->
-                                val cleaned = jsResult?.replace("\\\"", "\"")?.trim('"', ' ')
-                                var targetUrl = currentBrowserUrl
-                                if (!cleaned.isNullOrBlank() && cleaned != "null") {
-                                    if (cleaned.contains("\"url\":\"")) {
-                                        val extracted = cleaned.substringAfter("\"url\":\"").substringBefore("\"")
-                                        if (extracted.startsWith("http")) targetUrl = extracted
-                                    }
-                                }
-                                viewModel.onUrlChanged(targetUrl)
-                                viewModel.fetchInfo()
+                            val liveUrl = webViewRef?.url?.takeIf { it.isNotBlank() } ?: currentBrowserUrl
+                            val activeInfo = state.videoInfo ?: fallbackVideoInfo
+
+                            // If already analyzed for this URL, open dialog immediately
+                            if (activeInfo != null && (activeInfo.url == liveUrl || liveUrl.contains(activeInfo.url) || activeInfo.url.contains(liveUrl))) {
+                                showQualityPickerDialog = true
+                                return@clickable
                             }
+
+                            if (state.isLoading) {
+                                Toast.makeText(context, "Analyzing video, please wait...", Toast.LENGTH_SHORT).show()
+                                return@clickable
+                            }
+
+                            // If direct video stream was intercepted by WebView (e.g. FB / IG / direct mp4), set up fallback
+                            if (!interceptedMediaUrl.isNullOrBlank()) {
+                                fallbackVideoInfo = VideoInfo(
+                                    url = liveUrl,
+                                    title = currentBrowserTitle.ifBlank { "Detected Video" },
+                                    thumbnail = null,
+                                    duration = null,
+                                    uploader = null,
+                                    platform = Platform.fromUrl(liveUrl),
+                                    formats = listOf(
+                                        VideoFormat(
+                                            formatId = "direct_mp4",
+                                            quality = "HD Video (Direct MP4)",
+                                            ext = "mp4",
+                                            filesize = null,
+                                            fps = 30,
+                                            vcodec = "h264",
+                                            acodec = "aac",
+                                            hasVideo = true,
+                                            hasAudio = true,
+                                            downloadUrl = interceptedMediaUrl!!,
+                                        )
+                                    ),
+                                )
+                            }
+
+                            viewModel.onUrlChanged(liveUrl)
+                            viewModel.fetchInfo()
                         }
                 ) {
                     Row(
@@ -526,7 +612,7 @@ fun HomeScreen(
                             )
                             Spacer(Modifier.width(8.dp))
                             Text(
-                                if (detectedVideoOnPage != null) "Download Video (Ready)" else "Download Video / Audio",
+                                if (detectedVideoOnPage != null || interceptedMediaUrl != null) "Download Video (Ready)" else "Download Video / Audio",
                                 fontWeight = FontWeight.Bold,
                                 fontSize = 15.sp,
                                 color = Background
@@ -539,17 +625,36 @@ fun HomeScreen(
     }
 
     // Quality Picker Dialog (1-Tap Download Formats with calculated sizes)
-    if (showQualityPickerDialog && state.videoInfo != null) {
-        val info = state.videoInfo!!
+    val infoToPick = state.videoInfo ?: fallbackVideoInfo
+    if (showQualityPickerDialog && infoToPick != null) {
         QualityPickerDialog(
-            videoInfo = info,
-            selectedFormat = state.selectedFormat,
+            videoInfo = infoToPick,
+            selectedFormat = state.selectedFormat ?: infoToPick.formats.firstOrNull(),
             onFormatSelected = viewModel::onFormatSelected,
             onStartDownload = {
-                viewModel.startDownload()
+                if (fallbackVideoInfo != null && state.videoInfo == null) {
+                    val fmt = state.selectedFormat ?: infoToPick.formats.firstOrNull()
+                    if (fmt != null) {
+                        DownloadService.start(
+                            context.applicationContext as android.app.Application,
+                            com.vidflow.app.service.DownloadRequest(
+                                info = infoToPick,
+                                format = fmt,
+                                downloadUrl = fmt.downloadUrl
+                            )
+                        )
+                        Toast.makeText(context, "Download started!", Toast.LENGTH_SHORT).show()
+                    }
+                } else {
+                    viewModel.startDownload()
+                }
                 showQualityPickerDialog = false
+                fallbackVideoInfo = null
             },
-            onDismiss = { showQualityPickerDialog = false }
+            onDismiss = {
+                showQualityPickerDialog = false
+                fallbackVideoInfo = null
+            }
         )
     }
 }

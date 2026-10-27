@@ -25,20 +25,17 @@ import com.vidflow.app.theme.*
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SettingsScreen(
-    onOpenLogin: () -> Unit,
+    onOpenLogin: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
     val prefs = remember { context.getSharedPreferences("vidflow_settings", Context.MODE_PRIVATE) }
 
     var wifiOnly by remember { mutableStateOf(prefs.getBoolean("wifi_only", false)) }
-    var defaultQuality by remember { mutableStateOf(prefs.getString("default_quality", "Best Quality") ?: "Best Quality") }
     var language by remember { mutableStateOf(prefs.getString("app_language", "English") ?: "English") }
     var rememberedFileManager by remember { mutableStateOf(FileManagerHelper.getRememberedPackage(context)) }
 
-    var showQualityDialog by remember { mutableStateOf(false) }
     var showLanguageDialog by remember { mutableStateOf(false) }
-    var showFeedbackDialog by remember { mutableStateOf(false) }
     var showAboutDialog by remember { mutableStateOf(false) }
 
     Scaffold(
@@ -83,13 +80,6 @@ fun SettingsScreen(
                             }
                         )
                         HorizontalDivider(color = Outline, thickness = 0.5.dp, modifier = Modifier.padding(horizontal = 16.dp))
-                        SettingsRow(
-                            icon = Icons.Rounded.HighQuality,
-                            title = "Default Quality",
-                            subtitle = defaultQuality,
-                            onClick = { showQualityDialog = true }
-                        )
-                        HorizontalDivider(color = Outline, thickness = 0.5.dp, modifier = Modifier.padding(horizontal = 16.dp))
                         SettingsSwitchRow(
                             icon = Icons.Rounded.Wifi,
                             title = "Download over Wi-Fi Only",
@@ -113,7 +103,6 @@ fun SettingsScreen(
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Column {
-                        // Bug 4 fix: Setting to reset remembered file manager app
                         val fileAppSubtitle = when {
                             FileManagerHelper.isSamsungMyFilesInstalled(context) -> "Samsung My Files (Auto-detected)"
                             rememberedFileManager != null -> "Remembered: $rememberedFileManager"
@@ -136,19 +125,12 @@ fun SettingsScreen(
                             subtitle = language,
                             onClick = { showLanguageDialog = true }
                         )
-                        HorizontalDivider(color = Outline, thickness = 0.5.dp, modifier = Modifier.padding(horizontal = 16.dp))
-                        SettingsRow(
-                            icon = Icons.Rounded.AccountCircle,
-                            title = "Manage Platform Logins",
-                            subtitle = "Instagram, Facebook, Threads, X sessions",
-                            onClick = onOpenLogin
-                        )
                     }
                 }
             }
 
             item {
-                SectionHeader("Support & About")
+                SectionHeader("About")
                 Surface(
                     color = Surface,
                     shape = RoundedCornerShape(18.dp),
@@ -156,13 +138,6 @@ fun SettingsScreen(
                     modifier = Modifier.fillMaxWidth()
                 ) {
                     Column {
-                        SettingsRow(
-                            icon = Icons.Rounded.Feedback,
-                            title = "Send Feedback",
-                            subtitle = "Help us improve VidFlow",
-                            onClick = { showFeedbackDialog = true }
-                        )
-                        HorizontalDivider(color = Outline, thickness = 0.5.dp, modifier = Modifier.padding(horizontal = 16.dp))
                         SettingsRow(
                             icon = Icons.Rounded.Info,
                             title = "About VidFlow",
@@ -173,47 +148,6 @@ fun SettingsScreen(
                 }
             }
         }
-    }
-
-    // Quality Picker Dialog
-    if (showQualityDialog) {
-        val qualities = listOf("Best Available", "1080p (FHD)", "720p (HD)", "480p (SD)", "Audio Only (MP3)")
-        AlertDialog(
-            onDismissRequest = { showQualityDialog = false },
-            title = { Text("Select Default Quality") },
-            text = {
-                Column {
-                    qualities.forEach { q ->
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable {
-                                    defaultQuality = q
-                                    prefs.edit().putString("default_quality", q).apply()
-                                    showQualityDialog = false
-                                }
-                                .padding(vertical = 12.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            RadioButton(
-                                selected = defaultQuality == q,
-                                onClick = {
-                                    defaultQuality = q
-                                    prefs.edit().putString("default_quality", q).apply()
-                                    showQualityDialog = false
-                                }
-                            )
-                            Spacer(Modifier.width(8.dp))
-                            Text(q, color = TextPrimary)
-                        }
-                    }
-                }
-            },
-            confirmButton = {},
-            dismissButton = {
-                TextButton(onClick = { showQualityDialog = false }) { Text("Cancel") }
-            }
-        )
     }
 
     // Language Picker Dialog
@@ -247,42 +181,6 @@ fun SettingsScreen(
             confirmButton = {},
             dismissButton = {
                 TextButton(onClick = { showLanguageDialog = false }) { Text("Cancel") }
-            }
-        )
-    }
-
-    // Feedback Dialog
-    if (showFeedbackDialog) {
-        var feedbackText by remember { mutableStateOf("") }
-        AlertDialog(
-            onDismissRequest = { showFeedbackDialog = false },
-            title = { Text("Feedback & Suggestions") },
-            text = {
-                Column {
-                    Text("Have a bug to report or feature request?", color = TextSecondary, style = MaterialTheme.typography.bodySmall)
-                    Spacer(Modifier.height(8.dp))
-                    OutlinedTextField(
-                        value = feedbackText,
-                        onValueChange = { feedbackText = it },
-                        placeholder = { Text("Enter your feedback...") },
-                        modifier = Modifier.fillMaxWidth().height(120.dp),
-                        maxLines = 5
-                    )
-                }
-            },
-            confirmButton = {
-                Button(
-                    onClick = {
-                        Toast.makeText(context, "Thank you for your feedback!", Toast.LENGTH_SHORT).show()
-                        showFeedbackDialog = false
-                    },
-                    colors = ButtonDefaults.buttonColors(containerColor = Accent, contentColor = Background)
-                ) {
-                    Text("Submit")
-                }
-            },
-            dismissButton = {
-                TextButton(onClick = { showFeedbackDialog = false }) { Text("Cancel") }
             }
         )
     }

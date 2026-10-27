@@ -116,49 +116,75 @@ internal class TwitterExtractor(private val client: OkHttpClient) {
             val tweet = json.optJSONObject("tweet") ?: return null
             val media = tweet.optJSONObject("media") ?: return null
             val formats = mutableListOf<VideoFormat>()
+            val seenQuality = mutableSetOf<String>()
             val videoArrays = listOfNotNull(media.optJSONArray("videos"), media.optJSONArray("all"))
+            var highestAudioSourceUrl: String? = null
+            var maxAudioBitrate = -1
+
             for (videos in videoArrays) {
                 for (i in 0 until videos.length()) {
                     val v = videos.getJSONObject(i)
                     if (v.optString("type") == "photo") continue
-                    // Prefer the formats list: highest-bitrate MP4 wins.
                     val fmtArr = v.optJSONArray("formats")
-                    var bestUrl: String? = null
-                    var bestBitrate = -1
-                    if (fmtArr != null) {
+                    if (fmtArr != null && fmtArr.length() > 0) {
                         for (j in 0 until fmtArr.length()) {
                             val f = fmtArr.getJSONObject(j)
                             val fUrl = f.optString("url").takeIf { it.isNotEmpty() } ?: continue
                             if (!fUrl.contains(".mp4")) continue
                             val br = f.optInt("bitrate", 0)
-                            if (br > bestBitrate) { bestBitrate = br; bestUrl = fUrl }
+                            val h = f.optInt("height", v.optInt("height", 0))
+                            val quality = when {
+                                h >= 1080 || br >= 2_000_000 -> "1080p HD"
+                                h >= 720 || br >= 800_000 -> "720p HD"
+                                h >= 480 || br >= 350_000 -> "480p"
+                                h >= 360 || br > 0 -> "360p"
+                                else -> "Standard MP4"
+                            }
+                            if (br > maxAudioBitrate) {
+                                maxAudioBitrate = br
+                                highestAudioSourceUrl = fUrl
+                            }
+                            if (seenQuality.add(quality)) {
+                                formats.add(VideoFormat(
+                                    formatId = if (br > 0) br.toString() else "${v.optInt("width")}x$h",
+                                    quality = quality, ext = "mp4",
+                                    filesize = null, fps = null, vcodec = "h264", acodec = "aac",
+                                    hasVideo = true, hasAudio = true, downloadUrl = fUrl,
+                                ))
+                            }
+                        }
+                    } else {
+                        val vUrl = v.optString("url").takeIf { it.isNotEmpty() && it.contains(".mp4") }
+                        if (vUrl != null && seenQuality.add("720p HD")) {
+                            highestAudioSourceUrl = vUrl
+                            formats.add(VideoFormat(
+                                formatId = "default",
+                                quality = "720p HD", ext = "mp4",
+                                filesize = null, fps = null, vcodec = "h264", acodec = "aac",
+                                hasVideo = true, hasAudio = true, downloadUrl = vUrl,
+                            ))
                         }
                     }
-                    val vUrl = bestUrl
-                        ?: v.optString("url").takeIf { it.isNotEmpty() && it.contains(".mp4") }
-                        ?: continue
-                    val h = v.optInt("height", 0)
-                    val quality = when {
-                        bestBitrate >= 2_000_000 -> "1080p"
-                        bestBitrate >= 800_000 -> "720p"
-                        bestBitrate >= 300_000 -> "480p"
-                        bestBitrate > 0 -> "360p"
-                        h >= 1080 -> "1080p"
-                        h >= 720 -> "720p"
-                        h >= 480 -> "480p"
-                        h > 0 -> "${h}p"
-                        else -> "Best"
-                    }
-                    formats.add(VideoFormat(
-                        formatId = if (bestBitrate > 0) bestBitrate.toString() else "${v.optInt("width")}x$h",
-                        quality = quality, ext = "mp4",
-                        filesize = null, fps = null, vcodec = "h264", acodec = "aac",
-                        hasVideo = true, hasAudio = true, downloadUrl = vUrl,
-                    ))
                 }
                 if (formats.isNotEmpty()) break
             }
             if (formats.isEmpty()) return null
+
+            // Add MP3 audio option from the video stream
+            if (highestAudioSourceUrl != null) {
+                formats.add(VideoFormat(
+                    formatId = "mp3_audio",
+                    quality = "MP3 Audio (128 kbps)",
+                    ext = "mp3",
+                    filesize = null,
+                    fps = null,
+                    vcodec = null,
+                    acodec = "mp3",
+                    hasVideo = false,
+                    hasAudio = true,
+                    downloadUrl = highestAudioSourceUrl,
+                ))
+            }
 
             val author = tweet.optJSONObject("author")?.optString("screen_name") ?: "twitter"
             VideoExtractor.Result.Success(VideoInfo(
@@ -166,7 +192,9 @@ internal class TwitterExtractor(private val client: OkHttpClient) {
                 title = tweet.optString("text", "Twitter/X Video").take(80),
                 thumbnail = null, duration = null, uploader = "@$author",
                 platform = Platform.TWITTER,
-                formats = formats.sortedByDescending { it.quality.removeSuffix("p").toIntOrNull() ?: 0 },
+                formats = formats.sortedWith(compareByDescending<VideoFormat> {
+                    it.quality.removeSuffix("p HD").removeSuffix("p").toIntOrNull() ?: 0
+                }.thenBy { if (!it.hasVideo) 1 else 0 }),
             ))
         } catch (_: Exception) { null }
     }

@@ -3,6 +3,8 @@ package com.vidflow.app.ui.whatsapp
 import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
+import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
@@ -11,6 +13,7 @@ import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -30,6 +33,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -39,7 +43,14 @@ import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.documentfile.provider.DocumentFile
 import coil.compose.AsyncImage
+import com.vidflow.app.data.db.AppDatabase
+import com.vidflow.app.data.db.DownloadRecord
+import com.vidflow.app.data.model.DownloadStatus
+import com.vidflow.app.data.model.Platform
 import com.vidflow.app.theme.*
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.IOException
 
@@ -55,9 +66,11 @@ data class WhatsAppStatusItem(
 @Composable
 fun WhatsAppStatusScreen(
     onBack: () -> Unit,
+    onPlayMedia: (Uri, String, Boolean) -> Unit = { _, _, _ -> },
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
     val prefs = remember { context.getSharedPreferences("whatsapp_status_prefs", Context.MODE_PRIVATE) }
     var showStatusGrid by remember { mutableStateOf(false) }
     var statusItems by remember { mutableStateOf<List<WhatsAppStatusItem>>(emptyList()) }
@@ -283,7 +296,7 @@ fun WhatsAppStatusScreen(
                             StatusGridItem(
                                 item = item,
                                 onClick = { selectedPreviewItem = item },
-                                onSave = { saveStatus(context, item) }
+                                onSave = { saveStatus(context, item, scope) }
                             )
                         }
                     }
@@ -297,8 +310,11 @@ fun WhatsAppStatusScreen(
         StatusPreviewDialog(
             item = item,
             onDismiss = { selectedPreviewItem = null },
+            onPlay = {
+                onPlayMedia(item.uri, item.name, item.isVideo)
+            },
             onSave = {
-                saveStatus(context, item)
+                saveStatus(context, item, scope)
                 selectedPreviewItem = null
             }
         )
@@ -474,6 +490,81 @@ private fun WhatsAppHowItWorksCard(
 }
 
 @Composable
+private fun StatusMediaThumbnail(
+    item: WhatsAppStatusItem,
+    modifier: Modifier = Modifier,
+    contentScale: ContentScale = ContentScale.Crop,
+) {
+    val context = LocalContext.current
+    if (item.isVideo) {
+        var bitmap by remember(item.uri) { mutableStateOf<Bitmap?>(null) }
+        var isExtracting by remember(item.uri) { mutableStateOf(true) }
+
+        LaunchedEffect(item.uri) {
+            withContext(Dispatchers.IO) {
+                try {
+                    val retriever = MediaMetadataRetriever()
+                    try {
+                        context.contentResolver.openFileDescriptor(item.uri, "r")?.use { pfd ->
+                            retriever.setDataSource(pfd.fileDescriptor)
+                            bitmap = retriever.getFrameAtTime(1_000_000, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                                ?: retriever.frameAtTime
+                        }
+                    } catch (e: Exception) {
+                        if (item.uri.scheme == "file") {
+                            retriever.setDataSource(item.uri.path)
+                            bitmap = retriever.getFrameAtTime(1_000_000, MediaMetadataRetriever.OPTION_CLOSEST_SYNC)
+                                ?: retriever.frameAtTime
+                        }
+                    }
+                    retriever.release()
+                } catch (e: Exception) {
+                    // Frame extraction error fallback
+                } finally {
+                    isExtracting = false
+                }
+            }
+        }
+
+        if (bitmap != null) {
+            Image(
+                bitmap = bitmap!!.asImageBitmap(),
+                contentDescription = null,
+                contentScale = contentScale,
+                modifier = modifier
+            )
+        } else {
+            Box(
+                modifier = modifier.background(SurfaceVariant),
+                contentAlignment = Alignment.Center
+            ) {
+                if (isExtracting) {
+                    CircularProgressIndicator(
+                        modifier = Modifier.size(24.dp),
+                        strokeWidth = 2.dp,
+                        color = Accent
+                    )
+                } else {
+                    Icon(
+                        Icons.Rounded.PlayCircleFilled,
+                        contentDescription = "Video",
+                        tint = Accent,
+                        modifier = Modifier.size(36.dp)
+                    )
+                }
+            }
+        }
+    } else {
+        AsyncImage(
+            model = item.uri,
+            contentDescription = null,
+            contentScale = contentScale,
+            modifier = modifier
+        )
+    }
+}
+
+@Composable
 private fun StatusGridItem(
     item: WhatsAppStatusItem,
     onClick: () -> Unit,
@@ -486,9 +577,8 @@ private fun StatusGridItem(
             .background(SurfaceVariant)
             .clickable(onClick = onClick)
     ) {
-        AsyncImage(
-            model = item.uri,
-            contentDescription = null,
+        StatusMediaThumbnail(
+            item = item,
             contentScale = ContentScale.Crop,
             modifier = Modifier.fillMaxSize()
         )
@@ -536,6 +626,7 @@ private fun StatusGridItem(
 private fun StatusPreviewDialog(
     item: WhatsAppStatusItem,
     onDismiss: () -> Unit,
+    onPlay: () -> Unit,
     onSave: () -> Unit,
 ) {
     Dialog(onDismissRequest = onDismiss) {
@@ -554,20 +645,29 @@ private fun StatusPreviewDialog(
                         .height(320.dp)
                         .clip(RoundedCornerShape(12.dp))
                         .background(Color.Black)
+                        .clickable(enabled = item.isVideo, onClick = onPlay)
                 ) {
-                    AsyncImage(
-                        model = item.uri,
-                        contentDescription = null,
+                    StatusMediaThumbnail(
+                        item = item,
                         contentScale = ContentScale.Fit,
                         modifier = Modifier.fillMaxSize()
                     )
                     if (item.isVideo) {
-                        Icon(
-                            Icons.Rounded.PlayCircleFilled,
-                            contentDescription = "Play",
-                            tint = Color.White.copy(alpha = 0.8f),
-                            modifier = Modifier.size(54.dp).align(Alignment.Center)
-                        )
+                        Box(
+                            modifier = Modifier
+                                .align(Alignment.Center)
+                                .size(64.dp)
+                                .clip(CircleShape)
+                                .background(Color.Black.copy(alpha = 0.6f)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                Icons.Rounded.PlayArrow,
+                                contentDescription = "Play Video",
+                                tint = Color.White,
+                                modifier = Modifier.size(42.dp)
+                            )
+                        }
                     }
                 }
 
@@ -593,7 +693,7 @@ private fun StatusPreviewDialog(
 
                 Spacer(Modifier.height(16.dp))
 
-                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedButton(
                         onClick = onDismiss,
                         shape = RoundedCornerShape(12.dp),
@@ -601,15 +701,27 @@ private fun StatusPreviewDialog(
                     ) {
                         Text("Close")
                     }
+                    if (item.isVideo) {
+                        Button(
+                            onClick = onPlay,
+                            colors = ButtonDefaults.buttonColors(containerColor = SurfaceVariant, contentColor = TextPrimary),
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(Icons.Rounded.PlayArrow, contentDescription = null, modifier = Modifier.size(18.dp), tint = Accent)
+                            Spacer(Modifier.width(4.dp))
+                            Text("Play")
+                        }
+                    }
                     Button(
                         onClick = onSave,
                         colors = ButtonDefaults.buttonColors(containerColor = Accent, contentColor = Background),
                         shape = RoundedCornerShape(12.dp),
-                        modifier = Modifier.weight(1f)
+                        modifier = Modifier.weight(1.2f)
                     ) {
                         Icon(Icons.Rounded.Download, contentDescription = null, modifier = Modifier.size(18.dp))
                         Spacer(Modifier.width(6.dp))
-                        Text("Download", fontWeight = FontWeight.Bold)
+                        Text("Save", fontWeight = FontWeight.Bold)
                     }
                 }
             }
@@ -617,41 +729,78 @@ private fun StatusPreviewDialog(
     }
 }
 
-private fun saveStatus(context: Context, item: WhatsAppStatusItem) {
-    try {
-        val resolver = context.contentResolver
-        val values = ContentValues().apply {
-            put(MediaStore.MediaColumns.DISPLAY_NAME, "status_${System.currentTimeMillis()}_${item.name}")
-            put(MediaStore.MediaColumns.MIME_TYPE, if (item.isVideo) "video/mp4" else "image/jpeg")
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-                put(MediaStore.MediaColumns.RELATIVE_PATH, "${Environment.DIRECTORY_DOWNLOADS}/VidFlow")
-            }
-        }
-        val targetCollection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            MediaStore.Downloads.EXTERNAL_CONTENT_URI
-        } else {
-            if (item.isVideo) MediaStore.Video.Media.EXTERNAL_CONTENT_URI else MediaStore.Images.Media.EXTERNAL_CONTENT_URI
-        }
-        val targetUri = resolver.insert(targetCollection, values) ?: throw IOException("Could not create MediaStore entry")
-        resolver.openInputStream(item.uri)?.use { inStream ->
-            resolver.openOutputStream(targetUri)?.use { outStream ->
-                inStream.copyTo(outStream)
-            }
-        }
-        Toast.makeText(context, "Saved to Downloads/VidFlow!", Toast.LENGTH_SHORT).show()
-    } catch (e: Exception) {
+private fun saveStatus(
+    context: Context,
+    item: WhatsAppStatusItem,
+    coroutineScope: kotlinx.coroutines.CoroutineScope
+) {
+    coroutineScope.launch(Dispatchers.IO) {
+        var savedFilePath: String? = null
         try {
+            val fileName = "WA_Status_${System.currentTimeMillis()}_${item.name}"
             val destDir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "VidFlow")
-            destDir.mkdirs()
-            val destFile = File(destDir, "status_${System.currentTimeMillis()}_${item.name}")
-            context.contentResolver.openInputStream(item.uri)?.use { input ->
-                destFile.outputStream().use { output ->
-                    input.copyTo(output)
+            if (!destDir.exists()) destDir.mkdirs()
+            val destFile = File(destDir, fileName)
+
+            // Copy file content directly to Downloads/VidFlow
+            context.contentResolver.openInputStream(item.uri)?.use { inStream ->
+                destFile.outputStream().use { outStream ->
+                    inStream.copyTo(outStream)
                 }
             }
-            Toast.makeText(context, "Saved to Downloads/VidFlow!", Toast.LENGTH_SHORT).show()
-        } catch (e2: Exception) {
-            Toast.makeText(context, "Failed to save: ${e2.message}", Toast.LENGTH_LONG).show()
+            savedFilePath = destFile.absolutePath
+
+            // Also register in MediaStore so Android Gallery immediately scans it
+            try {
+                val resolver = context.contentResolver
+                val values = ContentValues().apply {
+                    put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
+                    put(MediaStore.MediaColumns.MIME_TYPE, if (item.isVideo) "video/mp4" else "image/jpeg")
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                        put(MediaStore.MediaColumns.RELATIVE_PATH, "${Environment.DIRECTORY_DOWNLOADS}/VidFlow")
+                    } else {
+                        put(MediaStore.MediaColumns.DATA, destFile.absolutePath)
+                    }
+                }
+                val targetCollection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    MediaStore.Downloads.EXTERNAL_CONTENT_URI
+                } else {
+                    if (item.isVideo) MediaStore.Video.Media.EXTERNAL_CONTENT_URI else MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+                }
+                resolver.insert(targetCollection, values)
+            } catch (e: Exception) {
+                // MediaStore indexing is optional best-effort
+            }
+
+            // Insert into Room Database so it appears in My Files -> Completed & All
+            try {
+                val db = AppDatabase.getInstance(context)
+                val record = DownloadRecord(
+                    url = item.uri.toString(),
+                    title = "WA_Status_${item.name.substringBeforeLast(".")}",
+                    thumbnail = if (!item.isVideo) item.uri.toString() else null,
+                    platform = Platform.WHATSAPP,
+                    quality = if (item.isVideo) "Video Status" else "Photo Status",
+                    ext = if (item.isVideo) "mp4" else "jpg",
+                    filePath = savedFilePath,
+                    fileSize = if (destFile.exists()) destFile.length() else item.sizeBytes,
+                    duration = null,
+                    status = DownloadStatus.COMPLETED,
+                    progress = 100,
+                    completedAt = System.currentTimeMillis()
+                )
+                db.downloadDao().insert(record)
+            } catch (e: Exception) {
+                // DB insertion best-effort
+            }
+
+            withContext(Dispatchers.Main) {
+                Toast.makeText(context, "Saved to Downloads/VidFlow & My Files!", Toast.LENGTH_SHORT).show()
+            }
+        } catch (e: Exception) {
+            withContext(Dispatchers.Main) {
+                Toast.makeText(context, "Failed to save: ${e.message}", Toast.LENGTH_LONG).show()
+            }
         }
     }
 }

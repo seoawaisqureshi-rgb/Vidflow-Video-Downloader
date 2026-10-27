@@ -96,7 +96,7 @@ class DownloadRepository(context: Context) {
         val result = when {
             // MP3 / Audio extraction always goes through yt-dlp with --extract-audio
             isMp3 -> {
-                downloadWithYtDlpAudio(info, id, downloadId, sink)
+                downloadWithYtDlpAudio(info, format, id, downloadId, sink)
             }
             // Explicitly marked as needing yt-dlp (DASH merge, HD, etc.)
             format.needsYtDlp -> {
@@ -331,6 +331,7 @@ class DownloadRepository(context: Context) {
      */
     private suspend fun downloadWithYtDlpAudio(
         info: VideoInfo,
+        format: VideoFormat,
         dbId: Long,
         downloadId: String,
         onProgress: suspend (DownloadProgress) -> Unit,
@@ -338,14 +339,21 @@ class DownloadRepository(context: Context) {
         val safeTitle = info.title.replace(Regex("[\\\\/:*?\"<>|]"), "_").trim().take(60).ifEmpty { "audio" }
         val key = downloadId.ifEmpty { dbId.toString() }
         val outputTemplate = YtDlpJobs.templateFor(appContext, key)
-        Log.d("VidFlow/YtDlp-MP3", "Start MP3 download: ${info.url}")
+        val audioQualityVal = if (format.quality.contains("320") || format.formatId == "mp3_320k") "0" else "5"
+        Log.d("VidFlow/YtDlp-MP3", "Start MP3 download (${format.quality}): ${info.url}")
 
-        val request = YoutubeDLRequest(info.url).apply {
+        val sourceUrl = if (info.platform == Platform.YOUTUBE || format.downloadUrl.isBlank()) {
+            info.url
+        } else {
+            format.downloadUrl
+        }
+
+        val request = YoutubeDLRequest(sourceUrl).apply {
             addOption("-f", "bestaudio/best")
             addOption("-o", "${outputTemplate}.%(ext)s")
             addOption("--extract-audio")
             addOption("--audio-format", "mp3")
-            addOption("--audio-quality", "0") // best quality
+            addOption("--audio-quality", audioQualityVal)
             withCommonOptions(info, key)
         }
         when (val outcome = executeYtDlp(request, "ytdlp_${key}_audio", key, dbId, onProgress = onProgress)) {

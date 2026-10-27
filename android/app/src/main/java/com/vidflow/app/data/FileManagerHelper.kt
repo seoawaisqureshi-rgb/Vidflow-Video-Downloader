@@ -72,24 +72,63 @@ object FileManagerHelper {
      * 3. System app chooser, remembering choice.
      */
     fun openFolder(context: Context, targetPath: String? = null) {
-        // 1. Samsung My Files check
+        val downloadsDir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+        val target = targetPath?.let { File(it) } ?: File(downloadsDir, "VidFlow")
+        if (!target.exists()) target.mkdirs()
+        val path = target.absolutePath
+
+        // 1. Samsung My Files check with specific folder targets
         if (isSamsungMyFilesInstalled(context)) {
-            val launchIntent = context.packageManager.getLaunchIntentForPackage(SAMSUNG_MY_FILES_PACKAGE)
-            if (launchIntent != null) {
-                launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                try {
-                    context.startActivity(launchIntent)
-                    return
-                } catch (_: Exception) {}
+            val intents = listOf(
+                Intent("samsung.myfiles.intent.action.LAUNCH_MY_FILES").apply {
+                    setPackage(SAMSUNG_MY_FILES_PACKAGE)
+                    putExtra("sKey", path)
+                    putExtra("folder_path", path)
+                    putExtra("startDir", path)
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                },
+                Intent(Intent.ACTION_VIEW).apply {
+                    setPackage(SAMSUNG_MY_FILES_PACKAGE)
+                    val uri = Uri.parse("content://com.android.externalstorage.documents/document/primary%3ADownload%2FVidFlow")
+                    setDataAndType(uri, "vnd.android.document/directory")
+                    putExtra("folder_path", path)
+                    putExtra("startDir", path)
+                    putExtra("current_path", path)
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                },
+                Intent("com.sec.android.app.myfiles.VIEW_FOLDER").apply {
+                    setPackage(SAMSUNG_MY_FILES_PACKAGE)
+                    putExtra("folder_path", path)
+                    putExtra("startDir", path)
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                },
+                context.packageManager.getLaunchIntentForPackage(SAMSUNG_MY_FILES_PACKAGE)?.apply {
+                    putExtra("folder_path", path)
+                    putExtra("startDir", path)
+                    putExtra("current_path", path)
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+                }
+            )
+
+            for (intent in intents.filterNotNull()) {
+                if (intent.resolveActivity(context.packageManager) != null) {
+                    try {
+                        context.startActivity(intent)
+                        return
+                    } catch (_: Exception) {}
+                }
             }
         }
 
         // 2. Check remembered choice
         val rememberedPkg = getRememberedPackage(context)
         if (!rememberedPkg.isNullOrBlank() && isPackageInstalled(context, rememberedPkg)) {
-            val rememberedIntent = context.packageManager.getLaunchIntentForPackage(rememberedPkg)
+            val rememberedIntent = context.packageManager.getLaunchIntentForPackage(rememberedPkg)?.apply {
+                putExtra("folder_path", path)
+                putExtra("startDir", path)
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_CLEAR_TOP)
+            }
             if (rememberedIntent != null) {
-                rememberedIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 try {
                     context.startActivity(rememberedIntent)
                     return

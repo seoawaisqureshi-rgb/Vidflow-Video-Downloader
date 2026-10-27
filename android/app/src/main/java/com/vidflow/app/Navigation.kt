@@ -19,20 +19,16 @@ import com.vidflow.app.ui.files.MyFilesScreen
 import com.vidflow.app.ui.history.HistoryViewModel
 import com.vidflow.app.ui.home.HomeScreen
 import com.vidflow.app.ui.home.HomeViewModel
-import com.vidflow.app.ui.library.LibraryScreen
 import com.vidflow.app.ui.login.LoginWebViewScreen
 import com.vidflow.app.ui.player.FullScreenVideoPlayerDialog
 import com.vidflow.app.ui.player.MediaPlayerManager
 import com.vidflow.app.ui.player.MiniPlayerBar
-import com.vidflow.app.ui.search.SearchScreen
 import com.vidflow.app.ui.settings.SettingsScreen
 import com.vidflow.app.ui.whatsapp.WhatsAppStatusScreen
 
 enum class MainNavTab(val label: String, val icon: ImageVector) {
     HOME("Home", Icons.Rounded.Home),
-    SEARCH("Search", Icons.Rounded.Search),
     MY_FILES("My Files", Icons.Rounded.Download),
-    LIBRARY("Library", Icons.Rounded.VideoLibrary),
     SETTINGS("Settings", Icons.Rounded.Settings),
 }
 
@@ -45,7 +41,6 @@ fun MainNavigation(
     var selectedTab by remember { mutableStateOf(MainNavTab.HOME) }
     var showWhatsAppSaver by remember { mutableStateOf(false) }
     var showLoginScreen by remember { mutableStateOf(false) }
-    var searchQueryForSearchTab by remember { mutableStateOf("") }
     var showFullScreenPlayer by remember { mutableStateOf(false) }
 
     Scaffold(
@@ -86,7 +81,11 @@ fun MainNavigation(
             when {
                 showWhatsAppSaver -> {
                     WhatsAppStatusScreen(
-                        onBack = { showWhatsAppSaver = false }
+                        onBack = { showWhatsAppSaver = false },
+                        onPlayMedia = { uri, title, isVideo ->
+                            MediaPlayerManager.play(context, uri.toString(), title, isVideo)
+                            if (isVideo) showFullScreenPlayer = true
+                        }
                     )
                 }
                 showLoginScreen -> {
@@ -103,33 +102,10 @@ fun MainNavigation(
                             viewModel = homeVm,
                             onOpenLogin = { showLoginScreen = true },
                             onOpenWhatsAppSaver = { showWhatsAppSaver = true },
-                            onNavigateToSearch = { query ->
-                                searchQueryForSearchTab = query
-                                selectedTab = MainNavTab.SEARCH
-                            }
-                        )
-                        MainNavTab.SEARCH -> SearchScreen(
-                            initialQuery = searchQueryForSearchTab,
-                            onOpenVideoInBrowser = { url ->
-                                homeVm.onUrlChanged(url)
-                                selectedTab = MainNavTab.HOME
-                            },
-                            onDownloadVideo = { url ->
-                                homeVm.onUrlChanged(url)
-                                homeVm.fetchInfo()
-                                selectedTab = MainNavTab.HOME
-                            }
                         )
                         MainNavTab.MY_FILES -> MyFilesScreen(
                             historyVm = historyVm,
                             onOpenPlayer = { uri, title, isVideo ->
-                                MediaPlayerManager.play(context, uri, title, isVideo)
-                                if (isVideo) showFullScreenPlayer = true
-                            }
-                        )
-                        MainNavTab.LIBRARY -> LibraryScreen(
-                            historyVm = historyVm,
-                            onPlayMedia = { uri, title, isVideo ->
                                 MediaPlayerManager.play(context, uri, title, isVideo)
                                 if (isVideo) showFullScreenPlayer = true
                             }

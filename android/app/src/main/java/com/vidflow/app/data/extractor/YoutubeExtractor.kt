@@ -170,14 +170,27 @@ internal class YoutubeExtractor(
                 }
             }
 
-            // Audio only — MP3
-            val audioFmt = allFormats.firstOrNull { f ->
-                (f.acodec ?: "none") != "none" && (f.vcodec ?: "none") == "none" && !f.url.isNullOrEmpty()
-            }
-            if (audioFmt != null && seenQuality.add("MP3 (Audio Only)")) {
+            // Audio only — MP3 options
+            if (seenQuality.add("MP3 (320 kbps)")) {
                 formats.add(VideoFormat(
-                    formatId    = "bestaudio/best",
-                    quality     = "MP3 (Audio Only)",
+                    formatId    = "mp3_320k",
+                    quality     = "MP3 (320 kbps)",
+                    ext         = "mp3",
+                    filesize    = null,
+                    fps         = null,
+                    vcodec      = null,
+                    acodec      = "mp3",
+                    hasVideo    = false,
+                    hasAudio    = true,
+                    downloadUrl = "",
+                    needsYtDlp  = true,
+                    ytDlpFormatSelector = "bestaudio/best",
+                ))
+            }
+            if (seenQuality.add("MP3 (128 kbps)")) {
+                formats.add(VideoFormat(
+                    formatId    = "mp3_128k",
+                    quality     = "MP3 (128 kbps)",
                     ext         = "mp3",
                     filesize    = null,
                     fps         = null,
@@ -342,9 +355,10 @@ internal class YoutubeExtractor(
             "1080p HD" to "bestvideo[height<=1080]+bestaudio/best",
             "720p HD"  to "bestvideo[height<=720]+bestaudio/best",
             "480p"     to "bestvideo[height<=480]+bestaudio/best",
+            "360p"     to "bestvideo[height<=360]+bestaudio/best",
         )
         hdTiersForMerge.forEach { (label, selector) ->
-            if (seenQuality.add("$label (yt-dlp)")) {
+            if (seenQuality.add(label)) {
                 formats.add(VideoFormat(
                     formatId = selector, quality = label, ext = "mp4",
                     filesize = null, fps = null, vcodec = "h264", acodec = "aac",
@@ -354,10 +368,18 @@ internal class YoutubeExtractor(
             }
         }
 
-        // MP3 audio only option
-        if (seenQuality.add("MP3 (Audio Only)")) {
+        // MP3 audio options (320 kbps & 128 kbps)
+        if (seenQuality.add("MP3 (320 kbps)")) {
             formats.add(VideoFormat(
-                formatId = "bestaudio/best", quality = "MP3 (Audio Only)", ext = "mp3",
+                formatId = "mp3_320k", quality = "MP3 (320 kbps)", ext = "mp3",
+                filesize = null, fps = null, vcodec = null, acodec = "mp3",
+                hasVideo = false, hasAudio = true, downloadUrl = "",
+                needsYtDlp = true, ytDlpFormatSelector = "bestaudio/best",
+            ))
+        }
+        if (seenQuality.add("MP3 (128 kbps)")) {
+            formats.add(VideoFormat(
+                formatId = "mp3_128k", quality = "MP3 (128 kbps)", ext = "mp3",
                 filesize = null, fps = null, vcodec = null, acodec = "mp3",
                 hasVideo = false, hasAudio = true, downloadUrl = "",
                 needsYtDlp = true, ytDlpFormatSelector = "bestaudio/best",

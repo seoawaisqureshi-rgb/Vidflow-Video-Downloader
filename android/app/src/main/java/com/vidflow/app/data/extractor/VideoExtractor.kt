@@ -50,6 +50,7 @@ class VideoExtractor(
             Platform.VIMEO       -> VimeoExtractor(client).extract(url)
             Platform.DAILYMOTION -> DailymotionExtractor(client).extract(url)
             Platform.PINTEREST   -> orderedChain(url, Platform.PINTEREST) { PinterestExtractor(client).extract(url) }
+            Platform.WHATSAPP    -> Result.Error("Use WhatsApp Status Saver to view and download statuses")
             Platform.UNKNOWN     -> {
                 val clean = url.substringBefore("?").lowercase()
                 if (clean.endsWith(".m3u8") || clean.endsWith(".mpd")) {
