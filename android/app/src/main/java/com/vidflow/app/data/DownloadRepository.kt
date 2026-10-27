@@ -73,10 +73,14 @@ class DownloadRepository(context: Context) {
                 status = DownloadStatus.DOWNLOADING, progress = 0,
             ),
         )
-        var lastPct = 0
+        // Resume floor: a resumed download starts from the stored progress,
+        // so the bar never drops back to 0 on resume.
+        var lastPct = existingRecordId?.let { dao.getById(it)?.progress } ?: 0
         val sink: suspend (DownloadProgress) -> Unit = { p ->
-            lastPct = p.percent.coerceIn(0, 100)
-            onProgress(p)
+            // Global monotonic clamp: displayed progress never decreases.
+            val clamped = p.percent.coerceIn(0, 100).coerceAtLeast(lastPct)
+            lastPct = clamped
+            onProgress(if (clamped == p.percent) p else p.copy(percent = clamped))
         }
 
         // Resolve download URL for Pinterest
@@ -112,11 +116,11 @@ class DownloadRepository(context: Context) {
                 }
                 downloadWithYtDlp(info, selector, format, id, downloadId, sink)
             }
-            // Direct HTTP download (fast path via OkHttp, Range-resumable)
-            else -> engine.download(info, format, resolvedUrl, downloadId.ifEmpty { id.toString() }) { progress ->
-                dao.updateProgress(id, DownloadStatus.DOWNLOADING, progress.percent.coerceIn(0, 99))
-                sink(progress)
-            }
+            // Direct HTTP download (fast path via OkHttp, Range-resumable),
+            // with one automatic fresh-URL retry on expired CDN links.
+            else -> downloadDirectWithRefresh(
+                info, format, resolvedUrl, downloadId.ifEmpty { id.toString() }, id, sink,
+            )
         }
 
         when (result) {
@@ -139,6 +143,43 @@ class DownloadRepository(context: Context) {
         }
 
         Pair(id, result)
+    }
+
+    /**
+     * Direct download with one automatic fresh-URL retry. CDN stream URLs
+     * (YouTube InnerTube, Instagram, Threads) expire quickly, so a 403/401
+     * used to force the user through 3-4 manual analyze + download rounds.
+     * Now the first 403/401 re-extracts once and retries with the fresh
+     * URL automatically; only a second failure is shown to the user.
+     */
+    private suspend fun downloadDirectWithRefresh(
+        info: VideoInfo,
+        format: VideoFormat,
+        url: String,
+        downloadId: String,
+        dbId: Long,
+        onProgress: suspend (DownloadProgress) -> Unit,
+    ): DownloadResult = withContext(Dispatchers.IO) {
+        val progressSink: suspend (DownloadProgress) -> Unit = { progress ->
+            dao.updateProgress(dbId, DownloadStatus.DOWNLOADING, progress.percent.coerceIn(0, 99))
+            onProgress(progress)
+        }
+        val first = engine.download(info, format, url, downloadId, progressSink)
+        if (first is DownloadResult.Error &&
+            (first.message.contains("HTTP 403") || first.message.contains("HTTP 401")) &&
+            info.platform in listOf(Platform.YOUTUBE, Platform.INSTAGRAM, Platform.THREADS)
+        ) {
+            val fresh = extractor.extract(info.url)
+            val freshFormats = (fresh as? VideoExtractor.Result.Success)?.info?.formats.orEmpty()
+            val freshUrl = freshFormats
+                .firstOrNull { it.quality == format.quality && it.downloadUrl.isNotBlank() }?.downloadUrl
+                ?: freshFormats.firstOrNull { it.downloadUrl.isNotBlank() }?.downloadUrl
+            if (!freshUrl.isNullOrBlank() && freshUrl != url) {
+                Log.d("VidFlow/Refresh", "Retrying expired URL with a fresh one")
+                return@withContext engine.download(info, format, freshUrl, downloadId, progressSink)
+            }
+        }
+        first
     }
 
     /** Pinterest CDN tokens expire quickly — fetch a fresh MP4 URL right before download. */
@@ -177,20 +218,43 @@ class DownloadRepository(context: Context) {
         downloadId: String,
         dbId: Long,
         percentMap: (Int) -> Int = { it },
+        /**
+         * Phase-aware mapping for yt-dlp's own merged downloads (single
+         * path). The split path passes its own percentMap and sets this
+         * false, because it already weights video/audio/merge itself.
+         */
+        phaseAware: Boolean = true,
         onProgress: suspend (DownloadProgress) -> Unit,
     ): YtDlpOutcome {
         YtDlpJobs.register(downloadId, processId)
         var lastPct = -1
         var totalBytesParsed = -1L
         var merging = false
+        // Single-path multi-file downloads: yt-dlp reports EACH file's
+        // progress 0..100, so the bar used to jump back to 0 when the
+        // second file started. Track file phases and map them onto one
+        // monotonic bar: file 1 -> 0..50, file 2 -> 50..90, merge -> 90..99.
+        // A phase change is a large backward jump after real progress,
+        // never a small wobble.
+        var prevRaw = -1
+        var phase = 0
         try {
             YoutubeDL.getInstance().execute(request, processId) { progress, _, line ->
                 if (line != null && (line.contains("[Merger]") || line.contains("Merging formats"))) {
                     merging = true
                 }
                 val rawPct = progress.toInt().coerceIn(0, 100)
-                val pct = if (merging) lastPct.coerceAtLeast(0) else percentMap(rawPct)
-                val mapped = pct.coerceIn(0, 99)
+                if (phaseAware && !merging && prevRaw > 50 && rawPct < prevRaw - 30 && phase == 0) {
+                    phase = 1
+                }
+                if (phaseAware && !merging) prevRaw = rawPct
+                val pct = when {
+                    merging -> maxOf(lastPct, 90)
+                    phaseAware && phase == 1 -> 50 + (rawPct * 40) / 100
+                    else -> percentMap(rawPct)
+                }
+                // Monotonic clamp: the displayed bar never goes backwards.
+                val mapped = pct.coerceIn(0, 99).coerceAtLeast(lastPct.coerceAtLeast(0))
                 if (mapped != lastPct || merging) {
                     lastPct = mapped
                     val parsedTotal = parseBytesFromLog(line)
@@ -243,6 +307,9 @@ class DownloadRepository(context: Context) {
         // Resume: never delete .part files on pause; --continue reuses them.
         addOption("--continue")
         addOption("--fragment-retries", "10")
+        // Parallel fragments: the single biggest download-speed win for
+        // fragmented (DASH/HLS) streams, the way fast downloader apps work.
+        addOption("--concurrent-fragments", "4")
         SessionCookies.writeCookiesTxt(appContext, info.platform)?.let { cookies ->
             addOption("--cookies", cookies.absolutePath)
         }
@@ -392,7 +459,7 @@ class DownloadRepository(context: Context) {
         }
         when (val outcome = executeYtDlp(
             videoRequest, "ytdlp_${key}_v", key, dbId,
-            percentMap = { (it * 45) / 100 }, onProgress = onProgress,
+            percentMap = { (it * 45) / 100 }, phaseAware = false, onProgress = onProgress,
         )) {
             is YtDlpOutcome.Paused -> return@withContext DownloadResult.Paused
             is YtDlpOutcome.Cancelled -> return@withContext DownloadResult.Cancelled
@@ -414,7 +481,7 @@ class DownloadRepository(context: Context) {
         }
         when (val outcome = executeYtDlp(
             audioRequest, "ytdlp_${key}_a", key, dbId,
-            percentMap = { 45 + (it * 45) / 100 }, onProgress = onProgress,
+            percentMap = { 45 + (it * 45) / 100 }, phaseAware = false, onProgress = onProgress,
         )) {
             is YtDlpOutcome.Paused -> return@withContext DownloadResult.Paused
             is YtDlpOutcome.Cancelled -> return@withContext DownloadResult.Cancelled

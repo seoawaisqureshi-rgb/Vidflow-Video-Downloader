@@ -46,7 +46,7 @@ class VideoExtractor(
             Platform.INSTAGRAM   -> extractInstagram(url)
             Platform.THREADS     -> extractThreads(url)
             Platform.REDDIT      -> RedditExtractor(client).extract(url)
-            Platform.TWITTER     -> TwitterExtractor(client).extract(url)
+            Platform.TWITTER     -> extractTwitter(url)
             Platform.VIMEO       -> VimeoExtractor(client).extract(url)
             Platform.DAILYMOTION -> DailymotionExtractor(client).extract(url)
             Platform.PINTEREST   -> orderedChain(url, Platform.PINTEREST) { PinterestExtractor(client).extract(url) }
@@ -66,6 +66,39 @@ class VideoExtractor(
                 }
             }
         }
+    }
+
+    // ── X / Twitter ────────────────────────────────────────────────────────────
+    // Strategy: NO LOGIN for public posts, exactly like dedicated
+    // Twitter-downloader apps. The anonymous chain inside
+    // TwitterExtractor runs FxTwitter -> VxTwitter (flaky backup) ->
+    // syndication, downloading the discovered video.twimg.com URL
+    // directly (yt-dlp's X path is dead in 2026 and must not be used).
+    // Honest limit: a post X hard age-gates (login wall) cannot be
+    // fetched by ANY anonymous method — only a logged-in, age-verified
+    // session can, so that case is reported plainly instead of retried.
+    // Login is NEVER the headline: it is only a footnote for private /
+    // age-gated posts. Public and sensitive-flagged-but-not-gated posts
+    // need no login.
+    private suspend fun extractTwitter(url: String): Result {
+        val result = orderedChain(url, Platform.TWITTER) { TwitterExtractor(client).extract(url) }
+        if (result is Result.Success) return result
+        if (SessionCookies.hasSession(Platform.TWITTER)) {
+            val message = (result as? Result.Error)?.message ?: "No video found in this tweet."
+            return Result.Error(
+                "$message\n\nYour X session may have expired — log out and back " +
+                    "in on the Login tab, then try again.",
+            )
+        }
+        return Result.Error(
+            "No video found in this tweet. It may be private, deleted, or " +
+                "an age-restricted post that X login-walls — no anonymous " +
+                "method can fetch a login-walled post, that is X's wall, " +
+                "not the app's.\n\n" +
+                "Note: only private and login-walled age-restricted posts " +
+                "need a login — public posts need none. If it is private " +
+                "or age-gated, logging in to X on the Login tab may help.",
+        )
     }
 
     // ── Facebook ─────────────────────────────────────────────────────────────
@@ -113,7 +146,16 @@ class VideoExtractor(
                     Platform.INSTAGRAM, SessionCookies.loginRequiredMessage(Platform.INSTAGRAM),
                 )
             }
-            return result
+            // Session exists but every route failed: the likeliest cause
+            // is a stale/rotated session, not a missing video. The old
+            // bare "could not extract" message sent users retrying a dead
+            // link instead of re-logging in.
+            val igMessage = (result as? Result.Error)?.message
+                ?: "Could not extract this Instagram post."
+            return Result.Error(
+                "$igMessage\n\nYour Instagram session may have expired — log " +
+                    "out and back in on the Login tab, then try again.",
+            )
         }
         // Stories: same chain, with the WebView session attached (brief 2.3).
         // A story link has no post shortcode, so the HTTP steps run against
@@ -300,6 +342,18 @@ class VideoExtractor(
     // ── Threads ───────────────────────────────────────────────────────────────
 
     private suspend fun extractThreads(url: String): Result {
+        // Session first: Threads increasingly walls off anonymous fetches,
+        // so when the user IS logged in, the authenticated yt-dlp route is
+        // the reliable one — running the 15s anonymous scrape first only
+        // burns time on a login wall. (The Instagram session does not
+        // transfer: Threads needs its own threads.com session cookies,
+        // which the Login tab collects separately.)
+        if (SessionCookies.hasSession(Platform.THREADS)) {
+            val authed = runBlockingWithTimeout(30_000L) { tryYtDlpThreads(url) }
+            if (authed is Result.Success && authed.info.formats.isNotEmpty()) {
+                return authed
+            }
+        }
         val result = orderedChain(url, Platform.THREADS) {
             ThreadsExtractor(client).extract(url)
                 .takeIf { it is Result.Success }
@@ -312,15 +366,24 @@ class VideoExtractor(
                 )
         }
         if (result is Result.Success) return result
-        val message = (result as? Result.Error)?.message ?: ""
-        if (message.contains("login", ignoreCase = true) &&
-            !SessionCookies.hasSession(Platform.THREADS)
-        ) {
-            return Result.LoginRequired(
-                Platform.THREADS, SessionCookies.loginRequiredMessage(Platform.THREADS),
-            )
+        if (!SessionCookies.hasSession(Platform.THREADS)) {
+            val message = (result as? Result.Error)?.message ?: ""
+            if (message.contains("login", ignoreCase = true)) {
+                return Result.LoginRequired(
+                    Platform.THREADS, SessionCookies.loginRequiredMessage(Platform.THREADS),
+                )
+            }
+            return result
         }
-        return result
+        // Session exists but both routes failed: the likeliest cause is a
+        // stale/rotated session, not a missing video. Say so, so the user
+        // re-logs in instead of retrying the same dead link.
+        val message = (result as? Result.Error)?.message
+            ?: "Threads video could not be downloaded."
+        return Result.Error(
+            "$message\n\nYour Threads session may have expired — log out and " +
+                "back in on the Login tab, then try again.",
+        )
     }
 
     private fun tryThreadsScrape(url: String): Result? {
@@ -591,6 +654,12 @@ class VideoExtractor(
         if (u.contains("youtu.be/")) {
             val id = u.substringAfterLast("youtu.be/").substringBefore("?").substringBefore("&")
             u = "https://www.youtube.com/watch?v=$id"
+        }
+        // Threads' canonical domain is threads.com; old threads.net links
+        // redirect there, so normalize up front instead of paying a
+        // redirect hop (and a different login wall) on every fetch.
+        if (u.contains("threads.net")) {
+            u = u.replace("threads.net", "threads.com")
         }
         return u
     }

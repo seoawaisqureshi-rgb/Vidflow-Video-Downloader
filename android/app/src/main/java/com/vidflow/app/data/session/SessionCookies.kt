@@ -38,7 +38,11 @@ object SessionCookies {
         ),
         THREADS(
             "Threads", "https://www.threads.net/login/",
-            listOf("threads.net", "instagram.com"), Platform.THREADS,
+            listOf("threads.net", "threads.com", "instagram.com"), Platform.THREADS,
+        ),
+        X(
+            "X / Twitter", "https://x.com/i/flow/login/",
+            listOf("x.com", "twitter.com"), Platform.TWITTER,
         ),
     }
 
@@ -62,21 +66,17 @@ object SessionCookies {
     }
 
     /**
-     * A host counts as logged in when it has any cookie whose name looks like
-     * a session cookie (sessionid, c_user, sb, ds_user_id, etc.). A bare
-     * tracking cookie alone is not enough, so login-walled pages do not get a
-     * false "logged in" signal.
+     * A host counts as logged in ONLY when it holds a real session cookie
+     * (sessionid, c_user, sb, ds_user_id). Tracking cookies alone
+     * (csrftoken, datr, ig_did, m_pixel_ratio) are set for anonymous
+     * visitors too, so they must NEVER count as "logged in" — otherwise
+     * the Login tab shows "logged in" for a user who never signed in,
+     * and every login-walled download then fails mysteriously.
      */
     private fun isLikelySessionCookie(host: String): Boolean {
         val header = getCookieHeader("https://$host/") ?: return false
-        val sessionNames = listOf(
-            "sessionid", "c_user", "sb", "ds_user_id", "ig_did",
-            "csrftoken", "datr", "m_pixel_ratio",
-        )
-        // csrftoken/datr alone only prove a visit, so require a stronger one.
         val names = header.split(";").map { it.substringBefore("=").trim().lowercase() }
-        return names.any { it in listOf("sessionid", "c_user", "sb", "ds_user_id") } ||
-            ("csrftoken" in names && names.size >= 2)
+        return names.any { it in listOf("sessionid", "c_user", "sb", "ds_user_id") }
     }
 
     /**
@@ -125,18 +125,34 @@ object SessionCookies {
         }
     }
 
-    /** Logs out of one platform: clears its WebView cookies + cookies.txt. */
+    /**
+     * Logs out of one platform: clears its WebView cookies + cookies.txt.
+     *
+     * Domain-correct clearing is essential: a session cookie lives on the
+     * ".host" domain (all subdomains), so expiring a host-only cookie does
+     * NOT delete it and the user stays logged in after tapping Logout.
+     * Every cookie is therefore expired twice — once for the ".host"
+     * domain and once for the bare host — and for the www variant too.
+     */
     fun logout(context: Context, platform: Platform) {
         try {
             val mgr = CookieManager.getInstance()
             val hosts = platformFor(platform)?.cookieHosts
                 ?: platform.domains.takeIf { it.isNotEmpty() }.orEmpty()
-            for (host in hosts) {
+            val allHosts = (hosts + hosts.map { "www.$it" }).distinct()
+            for (host in allHosts) {
                 val header = mgr.getCookie("https://$host/")
                 header?.split(";")?.forEach { pair ->
                     val name = pair.substringBefore("=").trim()
                     if (name.isNotEmpty()) {
-                        mgr.setCookie("https://$host/", "$name=; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Path=/")
+                        mgr.setCookie(
+                            "https://$host/",
+                            "$name=; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Path=/; Domain=.$host",
+                        )
+                        mgr.setCookie(
+                            "https://$host/",
+                            "$name=; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Path=/; Domain=$host",
+                        )
                     }
                 }
             }

@@ -17,13 +17,23 @@ import org.json.JSONObject
 
 /**
  * YouTube extractor.
- * PRIMARY: InnerTube WEB_CREATOR API — instant, no Python startup overhead (~200-500ms)
+ * PRIMARY: InnerTube player API with a client chain — instant, no Python
+ * startup overhead (~200-500ms when the first client answers).
  * FALLBACK: yt-dlp via youtubedl-android (handles cipher, age-gated, etc.)
  *
  * Speed strategy (matching TubeMate/VidMate approach):
- * 1. Hit InnerTube API directly → get plain CDN URLs immediately
- * 2. Only if InnerTube fails (ciphered/age-gated) → yt-dlp fallback
+ * 1. Hit InnerTube directly → get plain CDN URLs immediately.
+ * 2. Only if every InnerTube client fails → yt-dlp fallback.
  * Sequential, never parallel: the fast path alone is instant.
+ *
+ * Why the chain looks like this (2026 YouTube reality):
+ * - ANDROID first: the most reliable anonymous client — it does not need
+ *   a PO token and still serves plain (non-SABR) formats for most videos.
+ * - WEB second: a normal browser client with a normal Chrome user agent.
+ * - WEB_CREATOR is deliberately NOT used anonymously: per yt-dlp's own
+ *   documentation it only works with authentication and its formats
+ *   require a PO token, so an anonymous WEB_CREATOR request fails on
+ *   public videos and wastes the whole analysis budget.
  */
 internal class YoutubeExtractor(
     private val client: OkHttpClient,
@@ -31,17 +41,35 @@ internal class YoutubeExtractor(
 ) {
 
     /**
-     * Ordered chain (brief 3.4): the InnerTube fast path runs FIRST, alone,
-     * with a 15s timeout. Only if it fails does yt-dlp run, with a 30s
-     * timeout. No parallel run, no 2.5s delayed-fallback timer: a timer is
-     * not an architecture, and racing two extractors doubled CPU and
-     * network use on every YouTube link.
+     * Ordered chain: ANDROID (8s) -> WEB (8s) -> yt-dlp (30s). Short
+     * per-client budgets keep analysis fast: the common case (ANDROID
+     * answers) finishes in about a second, and the worst case is bounded
+     * instead of the old 15s + 30s silent wait that looked like a hang.
      */
     suspend fun extract(url: String): VideoExtractor.Result = withContext(Dispatchers.IO) {
-        val inner = runBlockingWithTimeout(15_000L) { tryInnerTube(url) }
-        if (inner is VideoExtractor.Result.Success && inner.info.formats.isNotEmpty()) {
-            return@withContext inner
+        val errors = mutableListOf<VideoExtractor.Result.Error>()
+
+        val android = runBlockingWithTimeout(8_000L) {
+            tryInnerTube(
+                url, "ANDROID", "19.09.37",
+                "com.google.android.youtube/19.09.37 (Linux; U; Android 11) gzip",
+            )
         }
+        if (android is VideoExtractor.Result.Success && android.info.formats.isNotEmpty()) {
+            return@withContext android
+        }
+        if (android is VideoExtractor.Result.Error) errors.add(android)
+
+        val web = runBlockingWithTimeout(8_000L) {
+            tryInnerTube(
+                url, "WEB", "2.20240111.09.00",
+                "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36",
+            )
+        }
+        if (web is VideoExtractor.Result.Success && web.info.formats.isNotEmpty()) {
+            return@withContext web
+        }
+        if (web is VideoExtractor.Result.Error) errors.add(web)
 
         val ytdlp = if (context != null) {
             runBlockingWithTimeout(30_000L) { tryYtDlp(url, context) }
@@ -52,7 +80,11 @@ internal class YoutubeExtractor(
             return@withContext ytdlp
         }
 
-        inner ?: VideoExtractor.Result.Error("YouTube extraction failed. Check your internet connection and try again.")
+        // Most useful error wins: an age-gate/login message tells the user
+        // what to do; a generic failure does not.
+        errors.firstOrNull { it.message.contains("login", ignoreCase = true) }
+            ?: errors.lastOrNull()
+            ?: VideoExtractor.Result.Error("YouTube extraction failed. Check your internet connection and try again.")
     }
 
     // ── yt-dlp ───────────────────────────────────────────────────────────────
@@ -174,19 +206,23 @@ internal class YoutubeExtractor(
     }
 
     // ── InnerTube API (fast path) ─────────────────────────────────────────────
-    private fun tryInnerTube(url: String): VideoExtractor.Result {
+    private fun tryInnerTube(
+        url: String,
+        clientName: String,
+        clientVersion: String,
+        userAgent: String,
+    ): VideoExtractor.Result {
         val videoId = extractVideoId(url)
             ?: return VideoExtractor.Result.Error("Could not parse YouTube video ID from URL.")
 
         return try {
-            // WEB_CREATOR client returns plain (non-ciphered) stream URLs for most public videos
             val payload = """
                 {
                     "videoId": "$videoId",
                     "context": {
                         "client": {
-                            "clientName": "WEB_CREATOR",
-                            "clientVersion": "1.20240101.01.00",
+                            "clientName": "$clientName",
+                            "clientVersion": "$clientVersion",
                             "hl": "en",
                             "gl": "US"
                         }
@@ -199,8 +235,16 @@ internal class YoutubeExtractor(
                 .url("https://www.youtube.com/youtubei/v1/player?prettyPrint=false")
                 .post(reqBody)
                 .addHeader("Content-Type", "application/json")
-                .addHeader("User-Agent", "Mozilla/5.0 (compatible; Googlebot/2.1)")
+                .addHeader("User-Agent", userAgent)
                 .addHeader("Accept-Language", "en-US,en;q=0.9")
+                .apply {
+                    // A YouTube login from the Browser tab unlocks
+                    // age-gated videos here too. Without it, age-gated
+                    // videos correctly report LOGIN_REQUIRED below.
+                    SessionCookies.getCookieHeader("https://www.youtube.com/")?.let {
+                        addHeader("Cookie", it)
+                    }
+                }
                 .build()
 
             val json = client.newCall(request).execute().use { resp ->
@@ -222,6 +266,21 @@ internal class YoutubeExtractor(
     }
 
     private fun parseInnerTubeResponse(url: String, json: JSONObject): VideoExtractor.Result {
+        // Playability first: a missing videoDetails object used to surface
+        // as a generic "not found" even for age-gated videos, which are
+        // recoverable by logging in. Say what is actually wrong.
+        val playability = json.optJSONObject("playabilityStatus")
+        when (playability?.optString("status")) {
+            "LOGIN_REQUIRED" -> return VideoExtractor.Result.Error(
+                "This YouTube video needs login (age-restricted or private). " +
+                    "Log in to YouTube in the Browser tab, then try again.",
+            )
+            "ERROR", "UNPLAYABLE" -> return VideoExtractor.Result.Error(
+                playability.optString("reason").takeIf { it.isNotEmpty() }
+                    ?: "This YouTube video is not available.",
+            )
+        }
+
         val details = json.optJSONObject("videoDetails")
             ?: return VideoExtractor.Result.Error("Video not found or private.")
 

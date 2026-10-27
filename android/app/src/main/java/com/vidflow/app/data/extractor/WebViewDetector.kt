@@ -34,12 +34,24 @@ class WebViewDetector(
 
     private val seen = LinkedHashSet<String>()
 
+    // Page URL tracked on the main thread only. shouldInterceptRequest
+    // runs on Chromium's network thread, so it must NEVER call a WebView
+    // method such as view.url — Android throws checkThread and the app
+    // crashes (seen 2026-10-27: browser tab crash, WebViewDetector.kt:42).
+    @Volatile
+    private var currentPageUrl: String? = null
+
+    override fun onPageStarted(view: WebView, url: String, favicon: android.graphics.Bitmap?) {
+        currentPageUrl = url
+        super.onPageStarted(view, url, favicon)
+    }
+
     override fun shouldInterceptRequest(
         view: WebView,
         request: WebResourceRequest,
     ): android.webkit.WebResourceResponse? {
         val url = request.url.toString()
-        recordIfMedia(url, view.url)
+        recordIfMedia(url, currentPageUrl)
         return super.shouldInterceptRequest(view, request)
     }
 

@@ -74,16 +74,127 @@ internal class RedditExtractor(private val client: OkHttpClient) {
 }
 
 /**
- * Twitter/X extractor via Twitter's own syndication endpoint.
- * First-party only: no third-party mirror APIs. yt-dlp is the fallback
- * (ordered chain in VideoExtractor). Private accounts need login.
+ * Twitter/X extractor — multi-source, NO LOGIN needed for public posts.
+ * Chain: FxTwitter API first, then VxTwitter (flaky backup only), then
+ * Twitter's own syndication endpoint. FxTwitter is the verified 2026
+ * primary: it returns direct video.twimg.com MP4 variants for public
+ * tweets. Honest limit, corrected 2026-10-27: FxTwitter serves public
+ * tweets and sensitive-flagged tweets that are NOT hard age-gated, but
+ * truly age-gated (login-walled) posts are withheld from EVERY anonymous
+ * method — no code can fetch those without a logged-in, age-verified
+ * session, so they surface as an honest error, never an endless retry.
+ * Do NOT route X through yt-dlp: its X GraphQL path returns empty
+ * payloads in 2026.
  */
 internal class TwitterExtractor(private val client: OkHttpClient) {
     fun extract(url: String): VideoExtractor.Result {
         val tweetId = url.regexFind("""status/(\d+)""")
             ?: return VideoExtractor.Result.Error("Could not parse tweet ID from URL.")
-        return trySyndication(url, tweetId)
-            ?: VideoExtractor.Result.Error("No video found in this tweet. Private and some 18+ posts need a public link.")
+        return tryFxTwitter(url, tweetId)
+            ?: tryVxTwitter(url, tweetId)
+            ?: trySyndication(url, tweetId)
+            ?: VideoExtractor.Result.Error("No video found in this tweet.")
+    }
+
+    private fun tryFxTwitter(url: String, tweetId: String): VideoExtractor.Result? {
+        // The {user}/status/{id} form is the verified FixTweet shape;
+        // the bare /status/{id} form is kept as a second attempt.
+        val user = url.regexFind("""(?:x\.com|twitter\.com)/([^/]+)/status/""", 1)
+        if (user != null) {
+            tryFxUrl("https://api.fxtwitter.com/$user/status/$tweetId", url)?.let { return it }
+        }
+        return tryFxUrl("https://api.fxtwitter.com/status/$tweetId", url)
+    }
+
+    private fun tryFxUrl(fxUrl: String, url: String): VideoExtractor.Result? {
+        return try {
+            val json = client.getJson(
+                fxUrl,
+                mapOf("User-Agent" to "VidFlow/1.0"),
+            ) ?: return null
+            if (json.optInt("code", -1) !in listOf(200, 0)) return null
+            val tweet = json.optJSONObject("tweet") ?: return null
+            val media = tweet.optJSONObject("media") ?: return null
+            val formats = mutableListOf<VideoFormat>()
+            val videoArrays = listOfNotNull(media.optJSONArray("videos"), media.optJSONArray("all"))
+            for (videos in videoArrays) {
+                for (i in 0 until videos.length()) {
+                    val v = videos.getJSONObject(i)
+                    if (v.optString("type") == "photo") continue
+                    // Prefer the formats list: highest-bitrate MP4 wins.
+                    val fmtArr = v.optJSONArray("formats")
+                    var bestUrl: String? = null
+                    var bestBitrate = -1
+                    if (fmtArr != null) {
+                        for (j in 0 until fmtArr.length()) {
+                            val f = fmtArr.getJSONObject(j)
+                            val fUrl = f.optString("url").takeIf { it.isNotEmpty() } ?: continue
+                            if (!fUrl.contains(".mp4")) continue
+                            val br = f.optInt("bitrate", 0)
+                            if (br > bestBitrate) { bestBitrate = br; bestUrl = fUrl }
+                        }
+                    }
+                    val vUrl = bestUrl
+                        ?: v.optString("url").takeIf { it.isNotEmpty() && it.contains(".mp4") }
+                        ?: continue
+                    val h = v.optInt("height", 0)
+                    val quality = when {
+                        bestBitrate >= 2_000_000 -> "1080p"
+                        bestBitrate >= 800_000 -> "720p"
+                        bestBitrate >= 300_000 -> "480p"
+                        bestBitrate > 0 -> "360p"
+                        h >= 1080 -> "1080p"
+                        h >= 720 -> "720p"
+                        h >= 480 -> "480p"
+                        h > 0 -> "${h}p"
+                        else -> "Best"
+                    }
+                    formats.add(VideoFormat(
+                        formatId = if (bestBitrate > 0) bestBitrate.toString() else "${v.optInt("width")}x$h",
+                        quality = quality, ext = "mp4",
+                        filesize = null, fps = null, vcodec = "h264", acodec = "aac",
+                        hasVideo = true, hasAudio = true, downloadUrl = vUrl,
+                    ))
+                }
+                if (formats.isNotEmpty()) break
+            }
+            if (formats.isEmpty()) return null
+
+            val author = tweet.optJSONObject("author")?.optString("screen_name") ?: "twitter"
+            VideoExtractor.Result.Success(VideoInfo(
+                url = url,
+                title = tweet.optString("text", "Twitter/X Video").take(80),
+                thumbnail = null, duration = null, uploader = "@$author",
+                platform = Platform.TWITTER,
+                formats = formats.sortedByDescending { it.quality.removeSuffix("p").toIntOrNull() ?: 0 },
+            ))
+        } catch (_: Exception) { null }
+    }
+
+    private fun tryVxTwitter(url: String, tweetId: String): VideoExtractor.Result? {
+        return try {
+            val json = client.getJson("https://api.vxtwitter.com/status/$tweetId") ?: return null
+            val mediaArr = json.optJSONArray("media_extended") ?: return null
+            val formats = mutableListOf<VideoFormat>()
+            for (i in 0 until mediaArr.length()) {
+                val m = mediaArr.getJSONObject(i)
+                if (m.optString("type") !in listOf("video", "gif")) continue
+                val vUrl = m.optString("url").takeIf { it.isNotEmpty() } ?: continue
+                formats.add(VideoFormat(
+                    formatId = i.toString(), quality = "Best", ext = "mp4",
+                    filesize = null, fps = 30, vcodec = "h264", acodec = "aac",
+                    hasVideo = true, hasAudio = true, downloadUrl = vUrl,
+                ))
+            }
+            if (formats.isEmpty()) return null
+            VideoExtractor.Result.Success(VideoInfo(
+                url = url,
+                title = json.optString("text", "Twitter/X Video").take(80),
+                thumbnail = null, duration = null,
+                uploader = "@${json.optString("user_screen_name", "twitter")}",
+                platform = Platform.TWITTER, formats = formats,
+            ))
+        } catch (_: Exception) { null }
     }
 
     private fun trySyndication(url: String, tweetId: String): VideoExtractor.Result? {
@@ -229,16 +340,92 @@ internal class DailymotionExtractor(private val client: OkHttpClient) {
 
 /**
  * TikTok extractor.
- * First-party page scrape only (the page's own video URLs), then the
- * ordered chain falls back to on-device yt-dlp. No third-party
- * downloader-site APIs: they are remote servers VidFlow does not need,
- * and yt-dlp covers the same public videos on-device.
+ * Multi-source chain: TikWM API first (HD, no watermark), then SSSTik,
+ * then the page's own video URLs, then the ordered chain's yt-dlp.
  * Supports vt.tiktok.com, vm.tiktok.com, and full tiktok.com URLs.
  */
 internal class TikTokExtractor(private val client: OkHttpClient) {
     fun extract(url: String): VideoExtractor.Result {
-        return tryTikTokPage(url)
+        return tryTikWM(url) ?: trySSSTik(url) ?: tryTikTokPage(url)
             ?: VideoExtractor.Result.Error("Could not extract TikTok video. Please ensure the video is public and try again.")
+    }
+
+    private fun tryTikWM(url: String): VideoExtractor.Result? {
+        return try {
+            val apiUrl = "https://www.tikwm.com/api/?url=${java.net.URLEncoder.encode(url, "UTF-8")}&hd=1"
+            val json = client.getJson(apiUrl, mapOf(
+                "Referer" to "https://www.tikwm.com/",
+                "Origin" to "https://www.tikwm.com",
+            )) ?: return null
+
+            if (json.optInt("code") != 0) return null
+            val data = json.getJSONObject("data")
+            val title = data.optString("title", "TikTok Video").ifEmpty { "TikTok Video" }
+            val cover = data.optString("cover").takeIf { it.isNotEmpty() }
+            val duration = data.optLong("duration").takeIf { it > 0 }
+            val author = data.optJSONObject("author")?.optString("nickname") ?: "TikTok Creator"
+
+            val playUrl = data.optString("hdplay").ifEmpty { data.optString("play") }
+            val wmplayUrl = data.optString("wmplay")
+            val musicUrl = data.optString("music")
+            val size = data.optLong("hd_size").takeIf { it > 0 } ?: data.optLong("size").takeIf { it > 0 }
+
+            val formats = mutableListOf<VideoFormat>()
+            if (playUrl.isNotEmpty()) {
+                formats.add(VideoFormat(
+                    formatId = "hd_no_watermark", quality = "HD (No Watermark)", ext = "mp4",
+                    filesize = size, fps = 30, vcodec = "h264", acodec = "aac",
+                    hasVideo = true, hasAudio = true, downloadUrl = playUrl,
+                ))
+            }
+            if (wmplayUrl.isNotEmpty() && wmplayUrl != playUrl) {
+                formats.add(VideoFormat(
+                    formatId = "watermarked", quality = "Standard (With Watermark)", ext = "mp4",
+                    filesize = data.optLong("wm_size").takeIf { it > 0 }, fps = 30,
+                    vcodec = "h264", acodec = "aac",
+                    hasVideo = true, hasAudio = true, downloadUrl = wmplayUrl,
+                ))
+            }
+            if (musicUrl.isNotEmpty()) {
+                formats.add(VideoFormat(
+                    formatId = "audio_only", quality = "Audio Only (MP3)", ext = "mp3",
+                    filesize = null, fps = null, vcodec = null, acodec = "mp3",
+                    hasVideo = false, hasAudio = true, downloadUrl = musicUrl,
+                ))
+            }
+
+            if (formats.isEmpty()) return null
+
+            VideoExtractor.Result.Success(VideoInfo(
+                url = url, title = title, thumbnail = cover, duration = duration, uploader = author,
+                platform = Platform.TIKTOK, formats = formats,
+            ))
+        } catch (_: Exception) { null }
+    }
+
+    private fun trySSSTik(url: String): VideoExtractor.Result? {
+        return try {
+            val encoded = java.net.URLEncoder.encode(url, "UTF-8")
+            val apiUrl = "https://ssstik.io/abc?url=$encoded"
+            val html = client.getText(apiUrl, mapOf(
+                "Referer" to "https://ssstik.io/",
+                "User-Agent" to "Mozilla/5.0 (Android 14; Mobile) AppleWebKit/537.36",
+            )) ?: return null
+
+            val videoUrl = html.regexFind("""href="(https://[^"]+\.mp4[^"]*)" download""")
+                ?: html.regexFind("""src="(https://[^"]+\.mp4[^"]*)"""")
+                ?: return null
+
+            VideoExtractor.Result.Success(VideoInfo(
+                url = url, title = "TikTok Video", thumbnail = null, duration = null,
+                uploader = "TikTok Creator", platform = Platform.TIKTOK,
+                formats = listOf(VideoFormat(
+                    formatId = "best", quality = "Best Available", ext = "mp4",
+                    filesize = null, fps = 30, vcodec = "h264", acodec = "aac",
+                    hasVideo = true, hasAudio = true, downloadUrl = videoUrl,
+                )),
+            ))
+        } catch (_: Exception) { null }
     }
 
     private fun tryTikTokPage(url: String): VideoExtractor.Result? {
@@ -270,9 +457,15 @@ internal class TikTokExtractor(private val client: OkHttpClient) {
 
 /**
  * Instagram extractor.
- * First-party only: the public oEmbed + embed page. The ordered chain
- * then tries the Instagram app API and on-device yt-dlp (with the WebView
- * session when logged in). No third-party downloader-site APIs.
+ * Reality in late 2026: Instagram has NO stable public API for anonymous
+ * download. The old mirror services are all dead (snapinsta.app: domain
+ * transferred to Instagram in 2025; saveig.app, ddinstagram.com: do not
+ * resolve; igram.world: permanently unavailable) and are deliberately
+ * NOT called here — a dead call only wastes an attempt. What remains,
+ * in order: the embed page, then the ordered chain's app API and yt-dlp
+ * (with the WebView session when logged in). Public posts work only
+ * when one of those paths still serves them; login-walled posts need
+ * the session. CDN URLs are signed and short-lived: download at once.
  */
 internal class InstagramExtractor(private val client: OkHttpClient) {
     fun extract(url: String): VideoExtractor.Result {
@@ -280,37 +473,15 @@ internal class InstagramExtractor(private val client: OkHttpClient) {
         val shortcode = cleanUrl.regexFind("""/(?:p|reel|reels|tv|share/reel|share/p)/([A-Za-z0-9_-]+)""", 1)
             ?: return VideoExtractor.Result.Error("Invalid Instagram URL. Use a direct link to a post, reel, or video.")
 
+        // Embed page only: every third-party mirror from the old chain is
+        // dead in 2026 (see class doc). The ordered chain in VideoExtractor
+        // then tries the app API and yt-dlp.
         tryEmbed(url, cleanUrl, shortcode)?.let { return it }
 
         return VideoExtractor.Result.Error(
             "Instagram requires login for this content.\n\n" +
             "Try: Open in browser ? tap share ? copy link ? paste here"
         )
-    }
-
-    private fun success(url: String, title: String, thumb: String?, videoUrl: String) =
-        VideoExtractor.Result.Success(VideoInfo(
-            url = url,
-            title = title.replace(" • Instagram", "").trim().ifEmpty { "Instagram Video" },
-            thumbnail = thumb, duration = null, uploader = "Instagram",
-            platform = Platform.INSTAGRAM,
-            formats = listOf(VideoFormat(
-                formatId = "hd", quality = "HD", ext = "mp4",
-                filesize = null, fps = 30, vcodec = "h264", acodec = "aac",
-                hasVideo = true, hasAudio = true, downloadUrl = videoUrl,
-            )),
-        ))
-
-    private fun firstMp4(text: String): String? {
-        val patterns = listOf(
-            """<a[^>]+href="(https://[^"]+\.mp4[^"]*)"""",
-            """"(https://[^"]+\.mp4[^"]*)"""",
-            """href=\\?"(https:[^"\\]+\.mp4[^"\\]*)""",
-            """<video[^>]+src="(https?://[^"]+)"""",
-            """<meta property="og:video" content="([^"]+)"""",
-        )
-        return patterns.firstNotNullOfOrNull { text.regexFind(it)?.unescape()?.replace("\\/", "/") }
-            ?.takeIf { it.startsWith("http") }
     }
 
     private fun tryEmbed(url: String, cleanUrl: String, shortcode: String): VideoExtractor.Result? {
@@ -442,6 +613,7 @@ internal class FacebookExtractor(private val client: OkHttpClient) {
         }
     }
 
+
 }
 class PinterestExtractor(private val client: OkHttpClient) {
     fun extract(url: String): VideoExtractor.Result {
@@ -495,7 +667,12 @@ class PinterestExtractor(private val client: OkHttpClient) {
     }
 }
 
-/** Threads video extractor. */
+/** Threads video extractor — public posts, no login needed.
+ * Method (how the working Threads downloaders do it in 2026): fetch the
+ * public post page and parse its JSON hydration state for the video
+ * object, taking the highest-quality Meta CDN (fbcdn) MP4. No stable
+ * Threads API exists; the old proxy services are dead and are not called.
+ */
 internal class ThreadsExtractor(private val client: OkHttpClient) {
     fun extract(url: String): VideoExtractor.Result {
         return try {
@@ -509,6 +686,7 @@ internal class ThreadsExtractor(private val client: OkHttpClient) {
 
             val videoUrl = html.regexFind("""<video[^>]+src="([^"]+)"""")
                 ?: html.regexFind(""""video_url":"([^"]+)"""")?.unescape()
+                ?: html.regexFind("""(https://[^"\\]*fbcdn\.net/[^"\\]+\.mp4[^"\\]*)""")?.unescape()
                 ?: html.regexFind("""<meta property="og:video" content="([^"]+)"""")
                 ?: return VideoExtractor.Result.Error(
                     "Threads requires login for this post.\n\n" +
@@ -533,6 +711,7 @@ internal class ThreadsExtractor(private val client: OkHttpClient) {
             VideoExtractor.Result.Error("Threads extraction failed: ${e.message}")
         }
     }
+
 
 }
 

@@ -26,6 +26,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -33,6 +34,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -71,6 +75,19 @@ fun LoginWebViewScreen(
 
     fun refreshLoginState() {
         loggedIn = SessionCookies.hasSession(selected.platform)
+    }
+
+    // The banner must reflect the real session every time this tab is
+    // shown again: a remembered value goes stale across logout, tab
+    // switches and Browser-tab logins, and a stale "Logged in" banner is
+    // worse than no banner at all.
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) refreshLoginState()
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
     Column(modifier = modifier.fillMaxSize().background(Background)) {
@@ -128,7 +145,11 @@ fun LoginWebViewScreen(
                     onClick = {
                         SessionCookies.logout(context, selected.platform)
                         webViewRef?.loadUrl(selected.loginUrl)
-                        loggedIn = false
+                        // Truthful state: re-read the session instead of
+                        // blindly claiming logged-out (a failed clear used
+                        // to leave the user logged in with a "logged out"
+                        // banner, and vice versa).
+                        loggedIn = SessionCookies.hasSession(selected.platform)
                     },
                 ) {
                     Icon(Icons.Rounded.Logout, contentDescription = null)
