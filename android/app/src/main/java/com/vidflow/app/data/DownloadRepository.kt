@@ -519,14 +519,15 @@ class DownloadRepository(context: Context) {
         DownloadResult.Success(finalPath, fileSize)
     }
 
-    /** Saves a file to Downloads/VidFlow/ via scoped storage (Android 10+) or legacy path. */
+    /** Saves a file to Music/VidFlow/ (for audio) or Downloads/VidFlow/ (for video) via scoped storage or legacy path. */
     private fun saveToDownloads(src: File, fileName: String, mimeType: String): String {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             val isAudio = mimeType.startsWith("audio/")
+            val targetDir = if (isAudio) "${Environment.DIRECTORY_MUSIC}/VidFlow" else "${Environment.DIRECTORY_DOWNLOADS}/VidFlow"
             val cv = ContentValues().apply {
                 put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
                 put(MediaStore.MediaColumns.MIME_TYPE, mimeType)
-                put(MediaStore.MediaColumns.RELATIVE_PATH, "${Environment.DIRECTORY_DOWNLOADS}/VidFlow")
+                put(MediaStore.MediaColumns.RELATIVE_PATH, targetDir)
                 put(MediaStore.MediaColumns.IS_PENDING, 1)
             }
             val collectionUri = if (isAudio) {
@@ -535,20 +536,49 @@ class DownloadRepository(context: Context) {
                 MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
             }
 
-            val uri = appContext.contentResolver.insert(collectionUri, cv)
-                ?: error("MediaStore insert returned null for $fileName")
+            try {
+                val uri = appContext.contentResolver.insert(collectionUri, cv)
+                    ?: run {
+                        // Fallback to MediaStore.Downloads for audio if Audio.Media returned null
+                        val fallbackCv = ContentValues().apply {
+                            put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
+                            put(MediaStore.MediaColumns.MIME_TYPE, mimeType)
+                            put(MediaStore.MediaColumns.RELATIVE_PATH, "${Environment.DIRECTORY_DOWNLOADS}/VidFlow")
+                            put(MediaStore.MediaColumns.IS_PENDING, 1)
+                        }
+                        appContext.contentResolver.insert(
+                            MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY), fallbackCv
+                        ) ?: error("MediaStore insert returned null for $fileName")
+                    }
 
-            appContext.contentResolver.openOutputStream(uri)?.use { out ->
-                src.inputStream().use { it.copyTo(out) }
+                appContext.contentResolver.openOutputStream(uri)?.use { out ->
+                    src.inputStream().use { it.copyTo(out) }
+                }
+                appContext.contentResolver.update(
+                    uri, ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }, null, null,
+                )
+                uri.toString()
+            } catch (e: Exception) {
+                // Secondary fallback: save to public Downloads/VidFlow or app files dir
+                Log.e("VidFlow/Storage", "Scoped storage save failed: ${e.message}, falling back to legacy", e)
+                @Suppress("DEPRECATION")
+                val fallbackFolder = File(
+                    Environment.getExternalStoragePublicDirectory(
+                        if (isAudio) Environment.DIRECTORY_MUSIC else Environment.DIRECTORY_DOWNLOADS
+                    ), "VidFlow"
+                )
+                fallbackFolder.mkdirs()
+                val dest = File(fallbackFolder, fileName)
+                src.copyTo(dest, overwrite = true)
+                dest.absolutePath
             }
-            appContext.contentResolver.update(
-                uri, ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }, null, null,
-            )
-            uri.toString()
         } else {
+            val isAudio = mimeType.startsWith("audio/")
             @Suppress("DEPRECATION")
             val dir = File(
-                Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "VidFlow",
+                Environment.getExternalStoragePublicDirectory(
+                    if (isAudio) Environment.DIRECTORY_MUSIC else Environment.DIRECTORY_DOWNLOADS
+                ), "VidFlow",
             )
             dir.mkdirs()
             val dest = File(dir, fileName)

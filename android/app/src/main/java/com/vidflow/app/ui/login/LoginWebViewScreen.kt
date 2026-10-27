@@ -6,6 +6,7 @@ import android.webkit.WebView
 import android.webkit.WebViewClient
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -13,6 +14,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -48,6 +50,8 @@ import com.vidflow.app.theme.TextMuted
 import com.vidflow.app.theme.TextPrimary
 import com.vidflow.app.theme.TextSecondary
 import com.vidflow.app.theme.Accent
+import com.vidflow.app.theme.Outline
+import com.vidflow.app.theme.SurfaceVariant
 
 /**
  * Login screen (brief sections 2.3 and 3.3).
@@ -65,6 +69,7 @@ import com.vidflow.app.theme.Accent
 @Composable
 fun LoginWebViewScreen(
     modifier: Modifier = Modifier,
+    onLoginSuccess: () -> Unit = {},
 ) {
     val context = LocalContext.current
     var selected by remember {
@@ -72,15 +77,17 @@ fun LoginWebViewScreen(
     }
     var loggedIn by remember { mutableStateOf(false) }
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
+    var isLoadingPage by remember { mutableStateOf(false) }
 
     fun refreshLoginState() {
-        loggedIn = SessionCookies.hasSession(selected.platform)
+        val wasLoggedIn = loggedIn
+        val isNowLoggedIn = SessionCookies.hasSession(selected.platform)
+        loggedIn = isNowLoggedIn
+        if (!wasLoggedIn && isNowLoggedIn) {
+            onLoginSuccess()
+        }
     }
 
-    // The banner must reflect the real session every time this tab is
-    // shown again: a remembered value goes stale across logout, tab
-    // switches and Browser-tab logins, and a stale "Logged in" banner is
-    // worse than no banner at all.
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
@@ -91,18 +98,16 @@ fun LoginWebViewScreen(
     }
 
     Column(modifier = modifier.fillMaxSize().background(Background)) {
-        Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 16.dp)) {
+        Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp)) {
             Text(
-                "Login for stories & private posts",
+                "Login for Stories & Private Posts",
                 style = MaterialTheme.typography.titleMedium,
                 color = TextPrimary,
                 fontWeight = FontWeight.Bold,
             )
-            Spacer(Modifier.height(6.dp))
+            Spacer(Modifier.height(4.dp))
             Text(
-                "Sign in inside the browser below. VidFlow never sees your " +
-                    "password — it stays on the login page. After login, " +
-                    "stories and login-only posts download like public ones.",
+                "Sign in directly below. VidFlow never sees or stores your password — it stays completely inside your local browser. Once logged in, private videos & stories will download seamlessly.",
                 style = MaterialTheme.typography.bodySmall,
                 color = TextSecondary,
             )
@@ -117,15 +122,16 @@ fun LoginWebViewScreen(
                             webViewRef?.loadUrl(platform.loginUrl)
                         },
                         colors = ButtonDefaults.buttonColors(
-                            containerColor = if (isSelected) Accent else TextMuted.copy(alpha = 0.25f),
+                            containerColor = if (isSelected) Accent else SurfaceVariant,
+                            contentColor = if (isSelected) Background else TextPrimary,
                         ),
                         shape = RoundedCornerShape(20.dp),
                     ) {
-                        Text(platform.label)
+                        Text(platform.label, fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal)
                     }
                 }
             }
-            Spacer(Modifier.height(12.dp))
+            Spacer(Modifier.height(10.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(
                     if (loggedIn) Icons.Rounded.CheckCircle else Icons.Rounded.Lock,
@@ -134,56 +140,93 @@ fun LoginWebViewScreen(
                 )
                 Spacer(Modifier.width(8.dp))
                 Text(
-                    if (loggedIn) "Logged in to ${selected.label} — stories will work now"
-                    else "Not logged in to ${selected.label}",
+                    if (loggedIn) "Logged in to ${selected.label} — stories & private videos ready"
+                    else "Sign in to ${selected.label} below",
                     style = MaterialTheme.typography.labelMedium,
-                    color = if (loggedIn) Success else TextMuted,
+                    color = if (loggedIn) Success else TextSecondary,
                     fontWeight = FontWeight.SemiBold,
                     modifier = Modifier.weight(1f),
                 )
-                OutlinedButton(
-                    onClick = {
-                        SessionCookies.logout(context, selected.platform)
-                        webViewRef?.loadUrl(selected.loginUrl)
-                        // Truthful state: re-read the session instead of
-                        // blindly claiming logged-out (a failed clear used
-                        // to leave the user logged in with a "logged out"
-                        // banner, and vice versa).
-                        loggedIn = SessionCookies.hasSession(selected.platform)
-                    },
-                ) {
-                    Icon(Icons.Rounded.Logout, contentDescription = null)
-                    Spacer(Modifier.width(4.dp))
-                    Text("Logout")
+                if (loggedIn) {
+                    OutlinedButton(
+                        onClick = {
+                            SessionCookies.logout(context, selected.platform)
+                            webViewRef?.loadUrl(selected.loginUrl)
+                            loggedIn = SessionCookies.hasSession(selected.platform)
+                        },
+                        shape = RoundedCornerShape(16.dp),
+                    ) {
+                        Icon(Icons.Rounded.Logout, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text("Logout", style = MaterialTheme.typography.labelSmall)
+                    }
                 }
             }
-            Spacer(Modifier.height(4.dp))
-            Text(
-                "After signing in, tap any video link on the Download tab — " +
-                    "or browse in the Browser tab, where you are already logged in.",
-                style = MaterialTheme.typography.labelSmall,
-                color = TextMuted,
-            )
+            if (loggedIn) {
+                Spacer(Modifier.height(8.dp))
+                Button(
+                    onClick = onLoginSuccess,
+                    colors = ButtonDefaults.buttonColors(containerColor = Accent, contentColor = Background),
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.fillMaxWidth().height(36.dp),
+                ) {
+                    Text("Return to Download Tab", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.labelMedium)
+                }
+            }
         }
 
-        AndroidView(
-            factory = {
-                WebView(it).apply {
-                    settings.javaScriptEnabled = true
-                    settings.domStorageEnabled = true
-                    CookieManager.getInstance().setAcceptCookie(true)
-                    webViewClient = object : WebViewClient() {
-                        override fun onPageFinished(view: WebView, url: String) {
-                            super.onPageFinished(view, url)
-                            refreshLoginState()
+        Box(modifier = Modifier.fillMaxWidth().weight(1f)) {
+            AndroidView(
+                factory = { ctx ->
+                    WebView(ctx).apply {
+                        // Bug 2 fix: Disable scrollbars that look like stray volume sliders
+                        isVerticalScrollBarEnabled = false
+                        isHorizontalScrollBarEnabled = false
+                        overScrollMode = WebView.OVER_SCROLL_NEVER
+
+                        settings.apply {
+                            javaScriptEnabled = true
+                            domStorageEnabled = true
+                            databaseEnabled = true
+                            setSupportZoom(true)
+                            builtInZoomControls = true
+                            displayZoomControls = false
+                            javaScriptCanOpenWindowsAutomatically = true
+                            // Use standard mobile Chrome user agent so Instagram does not detect embedded webview & blank out
+                            userAgentString = "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36"
                         }
+
+                        val cookieManager = CookieManager.getInstance()
+                        cookieManager.setAcceptCookie(true)
+                        cookieManager.setAcceptThirdPartyCookies(this, true)
+
+                        webViewClient = object : WebViewClient() {
+                            override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
+                                super.onPageStarted(view, url, favicon)
+                                isLoadingPage = true
+                            }
+
+                            override fun onPageFinished(view: WebView, url: String) {
+                                super.onPageFinished(view, url)
+                                isLoadingPage = false
+                                refreshLoginState()
+                            }
+                        }
+                        webViewRef = this
+                        loadUrl(selected.loginUrl)
                     }
-                    webViewRef = this
-                    loadUrl(selected.loginUrl)
-                }
-            },
-            modifier = Modifier.fillMaxWidth().weight(1f),
-        )
+                },
+                modifier = Modifier.fillMaxSize(),
+            )
+
+            if (isLoadingPage) {
+                androidx.compose.material3.LinearProgressIndicator(
+                    modifier = Modifier.fillMaxWidth().align(Alignment.TopCenter),
+                    color = Accent,
+                    trackColor = Outline,
+                )
+            }
+        }
     }
 }
 

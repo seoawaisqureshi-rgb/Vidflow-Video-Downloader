@@ -1,4 +1,4 @@
-﻿# VidFlow — Complete Development Log
+# VidFlow — Complete Development Log
 
 > **App:** VidFlow Video Downloader (Android)
 > **Package:** com.vidflow.app
@@ -171,16 +171,36 @@ cd android
 
 ---
 
-## Known Remaining Issues
+## Session 2026-10-27: VidMate Parity & Core Bug Fixes
 
-| Issue | Status |
-|-------|--------|
-| Instagram Stories | Not fixable — requires login cookie |
-| Facebook Stories | Not fixable — requires login |
-| yt-dlp pause (DASH) | Partial — UI pauses, yt-dlp subprocess runs to completion |
-| Threads login posts | Only public posts work |
-| Speed during FFmpeg merge | Shows 0 KB/s (no progress from FFmpeg) |
+### 1. MP3 Audio Download Crash Fix (Scoped Storage)
+- **Root Cause**: `MediaStore.Audio.Media.EXTERNAL_CONTENT_URI` throws `java.lang.IllegalArgumentException: Primary directory Download not allowed for content://media/external_primary/audio/media; allowed directories are [Alarms, Audiobooks, Music, Notifications, Podcasts, Recordings, Ringtones]` on Android 10+ when attempting to save audio under `Download/VidFlow`.
+- **Resolution**:
+  - In `DownloadRepository.kt` and `DownloadEngine.kt`, routed audio files to `Environment.DIRECTORY_MUSIC + "/VidFlow"`.
+  - Added multi-stage fallback (Downloads media store fallback, app-specific external storage file fallback).
+
+### 2. Four Core Bug Fixes
+- **Bug 1: Link re-analyzed from scratch when returning to download screen**
+  - Added `isUrlCurrentlyDownloading(...)` and tracked queued download URLs in `HomeViewModel.kt`.
+  - Inhibited clipboard re-analysis if URL matches any active or queued download.
+- **Bug 2: Instagram login screen layout**
+  - Updated `LoginWebViewScreen.kt` with modern mobile Chrome User-Agent (`Mozilla/5.0 ... Chrome/128.0.0.0 Mobile Safari/537.36`).
+  - Disabled extraneous scrollbars (`isVerticalScrollBarEnabled = false`), enabled third-party cookies, and wired `onLoginSuccess` to auto-return to download.
+- **Bug 3: Threads videos without login**
+  - Upgraded `ThreadsExtractor` in `PlatformExtractors.kt` with `facebookexternalhit/1.1` crawler UA and desktop Chrome fallback headers.
+  - Implemented multi-tier JSON regex hydration parsing (`playback_url`, `video_versions`, `video_dash_manifest`) and anonymous yt-dlp fallback.
+- **Bug 4: Samsung My Files & File Manager chooser**
+  - Created `FileManagerHelper.kt` targeting Samsung My Files (`com.sec.android.app.myfiles`) explicitly if installed.
+  - Provided persistent preference caching and a reset option in Settings.
+
+### 3. VidMate Parity & UI Overhaul (Strict VidFlow Identity & On-Device Architecture)
+- **WhatsApp Status Saver Screen**: WhatsApp Status scanner with 2-step user guide, media preview dialog, and one-tap save.
+- **Built-in Player & MiniPlayer**: `MediaPlayerManager` with ExoPlayer, floating `MiniPlayerBar` above navigation, and full-screen player dialog.
+- **My Files Screen**: Tabs (`All`, `Downloading`, `Completed`, `Failed`), search within downloads, real-time speed/progress, pause/resume/cancel.
+- **Library Screen**: Segmented into Downloaded, Local Device media, and Private Space vault protected by a 4-digit PIN lock.
+- **Settings Screen**: Video quality defaults, Wi-Fi only mode, language preference, file manager reset, feedback & about.
+- **Search Screen**: YouTube search integration, quick chips, and direct download actions.
 
 ---
 
-*Last updated: 2026-10-26*
+*Last updated: 2026-10-27*

@@ -79,14 +79,28 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
         _uiState.update { it.copy(loginRequiredPlatform = null) }
     }
 
+    // Track URLs that are currently being downloaded or queued
+    private val queuedDownloadUrls = mutableSetOf<String>()
     // Track the last URL that was auto-analyzed to avoid re-analysis on tab navigation
     private var lastAutoAnalyzedUrl: String? = null
     // Track the last URL that was successfully analyzed — don't re-analyze same URL
     private var lastAnalyzedUrl: String? = null
 
+    private fun isUrlCurrentlyDownloading(url: String): Boolean {
+        val active = activeDownloads.value.values
+        return active.any { entry ->
+            entry.id == url ||
+            entry.title.equals(url, ignoreCase = true) ||
+            (entry.state is ServiceState.Downloading || entry.state is ServiceState.Paused) &&
+            queuedDownloadUrls.contains(url)
+        } || queuedDownloadUrls.contains(url)
+    }
+
     fun onClipboardDetected(raw: String?) {
         val url = extractHttpUrl(raw) ?: return
-        if (url == lastAutoAnalyzedUrl) return
+        // Bug 1 fix: NEVER re-analyze a URL that is already downloading or was just started
+        if (isUrlCurrentlyDownloading(url)) return
+        if (url == lastAutoAnalyzedUrl || url == lastAnalyzedUrl) return
         val current = _uiState.value
         // If we're already showing results for this URL, don't trigger again
         if (url == current.videoInfo?.url) return
@@ -94,16 +108,10 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
         if (current.isLoading) return
 
         lastAutoAnalyzedUrl = url
+        // Show clipboard prompt instead of blindly wiping current download view
         _uiState.update {
-            it.copy(
-                urlInput = url,
-                clipboardUrl = null,
-                error = null,
-                videoInfo = null,
-                selectedFormat = null,
-            )
+            it.copy(clipboardUrl = url)
         }
-        fetchInfo()
     }
 
     fun dismissActiveDownload(id: String) {
@@ -112,6 +120,15 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
 
     fun acceptClipboardUrl() {
         val url = _uiState.value.clipboardUrl ?: return
+        if (isUrlCurrentlyDownloading(url)) {
+            _uiState.update {
+                it.copy(
+                    clipboardUrl = null,
+                    snackbarMessage = "This video is already in your download queue below.",
+                )
+            }
+            return
+        }
         _uiState.update {
             it.copy(
                 urlInput = url,
@@ -132,6 +149,17 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
         val url = _uiState.value.urlInput.trim()
         if (url.isBlank()) {
             _uiState.update { it.copy(error = "Please paste a video URL first.") }
+            return
+        }
+
+        // Bug 1 fix: If the link is already actively downloading, do not restart analysis!
+        if (isUrlCurrentlyDownloading(url)) {
+            _uiState.update {
+                it.copy(
+                    snackbarMessage = "This video is already downloading! See active progress below.",
+                    isLoading = false,
+                )
+            }
             return
         }
 
@@ -178,6 +206,10 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
         val info = _uiState.value.videoInfo ?: return
         val format = _uiState.value.selectedFormat ?: return
 
+        queuedDownloadUrls.add(info.url)
+        lastAnalyzedUrl = info.url
+        lastAutoAnalyzedUrl = info.url
+
         DownloadService.start(
             getApplication(),
             DownloadRequest(info = info, format = format, downloadUrl = format.downloadUrl),
@@ -194,7 +226,6 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
                 snackbarMessage = "Download started! Paste next link to queue more.",
             )
         }
-        lastAnalyzedUrl = null
     }
 
     fun pauseDownload(id: String) {

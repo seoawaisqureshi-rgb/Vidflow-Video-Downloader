@@ -239,10 +239,11 @@ class DownloadEngine(
             if (dest.exists()) dest.delete()
             return if (partFile.renameTo(dest)) dest.absolutePath else null
         }
+        val targetDir = if (isAudioOnly) "${Environment.DIRECTORY_MUSIC}/VidFlow" else "${Environment.DIRECTORY_DOWNLOADS}/VidFlow"
         val cv = ContentValues().apply {
             put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
             put(MediaStore.MediaColumns.MIME_TYPE, mimeType)
-            put(MediaStore.MediaColumns.RELATIVE_PATH, "${Environment.DIRECTORY_DOWNLOADS}/VidFlow")
+            put(MediaStore.MediaColumns.RELATIVE_PATH, targetDir)
             put(MediaStore.MediaColumns.IS_PENDING, 1)
         }
         val collectionUri = if (isAudioOnly) {
@@ -250,7 +251,20 @@ class DownloadEngine(
         } else {
             MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
         }
-        val uri = context.contentResolver.insert(collectionUri, cv) ?: return null
+        val uri = try {
+            context.contentResolver.insert(collectionUri, cv) ?: run {
+                val fallbackCv = ContentValues().apply {
+                    put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
+                    put(MediaStore.MediaColumns.MIME_TYPE, mimeType)
+                    put(MediaStore.MediaColumns.RELATIVE_PATH, "${Environment.DIRECTORY_DOWNLOADS}/VidFlow")
+                    put(MediaStore.MediaColumns.IS_PENDING, 1)
+                }
+                context.contentResolver.insert(MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY), fallbackCv)
+            }
+        } catch (_: Exception) {
+            null
+        } ?: return null
+
         try {
             context.contentResolver.openOutputStream(uri)?.use { out ->
                 partFile.inputStream().use { it.copyTo(out) }

@@ -358,11 +358,11 @@ class VideoExtractor(
             ThreadsExtractor(client).extract(url)
                 .takeIf { it is Result.Success }
                 ?: tryThreadsScrape(url)
+                ?: tryYtDlpThreads(url)
                 ?: Result.Error(
                     "Threads video could not be downloaded.\n\n" +
-                    "• Make sure the post is public\n" +
-                    "• Threads often blocks unauthenticated access\n" +
-                    "• Try copying the direct post link from the Threads app"
+                    "• Make sure the post contains a video and is public\n" +
+                    "• If this post requires login, sign in on the Login tab and try again"
                 )
         }
         if (result is Result.Success) return result

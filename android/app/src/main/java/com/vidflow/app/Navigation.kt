@@ -5,34 +5,35 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.AccountCircle
-import androidx.compose.material.icons.rounded.Download
-import androidx.compose.material.icons.rounded.FolderOpen
-import androidx.compose.material.icons.rounded.History
-import androidx.compose.material.icons.rounded.Language
+import androidx.compose.material.icons.rounded.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.lifecycle.viewmodel.compose.viewModel
+import com.vidflow.app.data.FileManagerHelper
 import com.vidflow.app.theme.*
-import com.vidflow.app.ui.browser.BrowserScreen
-import com.vidflow.app.ui.history.HistoryScreen
-import com.vidflow.app.ui.login.LoginWebViewScreen
+import com.vidflow.app.ui.files.MyFilesScreen
 import com.vidflow.app.ui.history.HistoryViewModel
 import com.vidflow.app.ui.home.HomeScreen
 import com.vidflow.app.ui.home.HomeViewModel
-import java.io.File
+import com.vidflow.app.ui.library.LibraryScreen
+import com.vidflow.app.ui.login.LoginWebViewScreen
+import com.vidflow.app.ui.player.FullScreenVideoPlayerDialog
+import com.vidflow.app.ui.player.MediaPlayerManager
+import com.vidflow.app.ui.player.MiniPlayerBar
+import com.vidflow.app.ui.search.SearchScreen
+import com.vidflow.app.ui.settings.SettingsScreen
+import com.vidflow.app.ui.whatsapp.WhatsAppStatusScreen
 
-private enum class NavTab(val label: String, val icon: ImageVector) {
-    HOME("Download", Icons.Rounded.Download),
-    BROWSER("Browser", Icons.Rounded.Language),
-    LOGIN("Login", Icons.Rounded.AccountCircle),
-    FOLDER("Folder", Icons.Rounded.FolderOpen),
-    HISTORY("History", Icons.Rounded.History),
+enum class MainNavTab(val label: String, val icon: ImageVector) {
+    HOME("Home", Icons.Rounded.Home),
+    SEARCH("Search", Icons.Rounded.Search),
+    MY_FILES("My Files", Icons.Rounded.Download),
+    LIBRARY("Library", Icons.Rounded.VideoLibrary),
+    SETTINGS("Settings", Icons.Rounded.Settings),
 }
 
 @Composable
@@ -40,121 +41,142 @@ fun MainNavigation(
     homeVm: HomeViewModel,
     historyVm: HistoryViewModel,
 ) {
-    var selectedTab by remember { mutableStateOf(NavTab.HOME) }
     val context = LocalContext.current
+    var selectedTab by remember { mutableStateOf(MainNavTab.HOME) }
+    var showWhatsAppSaver by remember { mutableStateOf(false) }
+    var showLoginScreen by remember { mutableStateOf(false) }
+    var searchQueryForSearchTab by remember { mutableStateOf("") }
+    var showFullScreenPlayer by remember { mutableStateOf(false) }
 
     Scaffold(
         containerColor = Background,
         bottomBar = {
-            VidFlowBottomBar(
-                selectedTab = selectedTab,
-                onTabSelected = { tab ->
-                    if (tab == NavTab.FOLDER) {
-                        // Open Downloads/VidFlow folder — don't change tab
-                        openDownloadsFolder(context)
-                    } else {
+            Column(modifier = Modifier.fillMaxWidth()) {
+                // Persistent Mini-Player Bar (Music & Video)
+                MiniPlayerBar(
+                    onExpand = { showFullScreenPlayer = true }
+                )
+                HorizontalDivider(thickness = 0.5.dp, color = Outline)
+                VidFlowBottomBar(
+                    selectedTab = selectedTab,
+                    onTabSelected = { tab ->
+                        showWhatsAppSaver = false
+                        showLoginScreen = false
                         selectedTab = tab
-                    }
-                },
-            )
+                    },
+                )
+            }
         },
     ) { innerPadding ->
-        when (selectedTab) {
-            NavTab.HOME    -> HomeScreen(
-                viewModel = homeVm,
-                modifier = Modifier.padding(innerPadding),
-                onOpenLogin = { selectedTab = NavTab.LOGIN },
-            )
-            NavTab.BROWSER -> BrowserScreen(
-                modifier = Modifier.padding(innerPadding),
-                onDownloadDetected = { url ->
-                    homeVm.analyzeUrl(url)
-                    selectedTab = NavTab.HOME
-                },
-            )
-            NavTab.LOGIN   -> LoginWebViewScreen(modifier = Modifier.padding(innerPadding))
-            NavTab.HISTORY -> HistoryScreen(viewModel = historyVm, modifier = Modifier.padding(innerPadding))
-            NavTab.FOLDER  -> HomeScreen(viewModel = homeVm, modifier = Modifier.padding(innerPadding))
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(innerPadding)
+        ) {
+            when {
+                showWhatsAppSaver -> {
+                    WhatsAppStatusScreen(
+                        onBack = { showWhatsAppSaver = false }
+                    )
+                }
+                showLoginScreen -> {
+                    LoginWebViewScreen(
+                        onLoginSuccess = {
+                            showLoginScreen = false
+                            selectedTab = MainNavTab.HOME
+                        }
+                    )
+                }
+                else -> {
+                    when (selectedTab) {
+                        MainNavTab.HOME -> HomeScreen(
+                            viewModel = homeVm,
+                            onOpenLogin = { showLoginScreen = true },
+                            onOpenWhatsAppSaver = { showWhatsAppSaver = true },
+                            onNavigateToSearch = { query ->
+                                searchQueryForSearchTab = query
+                                selectedTab = MainNavTab.SEARCH
+                            }
+                        )
+                        MainNavTab.SEARCH -> SearchScreen(
+                            initialQuery = searchQueryForSearchTab,
+                            onOpenVideoInBrowser = { url ->
+                                homeVm.onUrlChanged(url)
+                                selectedTab = MainNavTab.HOME
+                            },
+                            onDownloadVideo = { url ->
+                                homeVm.onUrlChanged(url)
+                                homeVm.fetchInfo()
+                                selectedTab = MainNavTab.HOME
+                            }
+                        )
+                        MainNavTab.MY_FILES -> MyFilesScreen(
+                            historyVm = historyVm,
+                            onOpenPlayer = { uri, title, isVideo ->
+                                MediaPlayerManager.play(context, uri, title, isVideo)
+                                if (isVideo) showFullScreenPlayer = true
+                            }
+                        )
+                        MainNavTab.LIBRARY -> LibraryScreen(
+                            historyVm = historyVm,
+                            onPlayMedia = { uri, title, isVideo ->
+                                MediaPlayerManager.play(context, uri, title, isVideo)
+                                if (isVideo) showFullScreenPlayer = true
+                            }
+                        )
+                        MainNavTab.SETTINGS -> SettingsScreen(
+                            onOpenLogin = { showLoginScreen = true }
+                        )
+                    }
+                }
+            }
         }
+    }
+
+    if (showFullScreenPlayer) {
+        FullScreenVideoPlayerDialog(
+            onDismiss = { showFullScreenPlayer = false }
+        )
     }
 }
 
 @Composable
 private fun VidFlowBottomBar(
-    selectedTab: NavTab,
-    onTabSelected: (NavTab) -> Unit,
+    selectedTab: MainNavTab,
+    onTabSelected: (MainNavTab) -> Unit,
 ) {
-    Box(
-        modifier = Modifier
-            .fillMaxWidth()
-            .background(Background),
+    NavigationBar(
+        containerColor = Surface.copy(alpha = 0.96f),
+        contentColor = TextSecondary,
+        tonalElevation = 0.dp,
+        modifier = Modifier.fillMaxWidth().height(62.dp)
     ) {
-        HorizontalDivider(thickness = 1.dp, color = Outline)
-        NavigationBar(
-            containerColor = Surface.copy(alpha = 0.95f),
-            contentColor = TextSecondary,
-            tonalElevation = 0.dp,
-        ) {
-            NavTab.entries.forEach { tab ->
-                val selected = tab == selectedTab
-                NavigationBarItem(
-                    selected = selected && tab != NavTab.FOLDER,
-                    onClick = { onTabSelected(tab) },
-                    icon = {
-                        Icon(
-                            tab.icon,
-                            contentDescription = tab.label,
-                            modifier = Modifier.size(22.dp),
-                        )
-                    },
-                    label = { Text(tab.label) },
-                    colors = NavigationBarItemDefaults.colors(
-                        selectedIconColor   = Accent,
-                        selectedTextColor   = Accent,
-                        unselectedIconColor = if (tab == NavTab.FOLDER) AccentDeep else TextMuted,
-                        unselectedTextColor = if (tab == NavTab.FOLDER) AccentDeep else TextMuted,
-                        indicatorColor      = AccentGlow,
-                    ),
-                )
-            }
-        }
-    }
-}
-
-/** Opens Downloads/VidFlow/ folder in the system file manager. */
-private fun openDownloadsFolder(context: android.content.Context) {
-    // Approach 1: DocumentsUI deep-link to VidFlow folder
-    try {
-        val uri = android.net.Uri.parse(
-            "content://com.android.externalstorage.documents/document/primary%3ADownload%2FVidFlow"
-        )
-        val intent = android.content.Intent(android.content.Intent.ACTION_VIEW).apply {
-            setDataAndType(uri, "vnd.android.document/directory")
-            addFlags(android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
-        }
-        context.startActivity(intent)
-        return
-    } catch (_: Exception) {}
-
-    // Approach 2: System Downloads app
-    try {
-        val intent = android.content.Intent(android.app.DownloadManager.ACTION_VIEW_DOWNLOADS)
-        context.startActivity(intent)
-        return
-    } catch (_: Exception) {}
-
-    // Approach 3: Generic Files app
-    try {
-        val intent = android.content.Intent(android.content.Intent.ACTION_VIEW).apply {
-            setDataAndType(
-                android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI,
-                "vnd.android.document/directory",
+        MainNavTab.entries.forEach { tab ->
+            val selected = tab == selectedTab
+            NavigationBarItem(
+                selected = selected,
+                onClick = { onTabSelected(tab) },
+                icon = {
+                    Icon(
+                        tab.icon,
+                        contentDescription = tab.label,
+                        modifier = Modifier.size(22.dp),
+                    )
+                },
+                label = {
+                    Text(
+                        tab.label,
+                        fontWeight = if (selected) FontWeight.Bold else FontWeight.Normal,
+                    )
+                },
+                colors = NavigationBarItemDefaults.colors(
+                    selectedIconColor = Accent,
+                    selectedTextColor = Accent,
+                    unselectedIconColor = TextMuted,
+                    unselectedTextColor = TextMuted,
+                    indicatorColor = AccentGlow,
+                ),
             )
         }
-        context.startActivity(intent)
-    } catch (_: Exception) {
-        android.widget.Toast.makeText(
-            context, "Could not open file manager. Check Downloads/VidFlow/ manually.", android.widget.Toast.LENGTH_LONG
-        ).show()
     }
 }

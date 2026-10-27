@@ -701,35 +701,73 @@ class PinterestExtractor(private val client: OkHttpClient) {
 internal class ThreadsExtractor(private val client: OkHttpClient) {
     fun extract(url: String): VideoExtractor.Result {
         return try {
-            val embedUrl = "${url.trimEnd('/')}/embed"
-            val html = client.getText(embedUrl, mapOf(
-                "User-Agent" to "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1",
+            val cleanUrl = url.substringBefore("?")
+            // Pattern 1: Try desktop & crawler headers that Threads serves public open graph / hydration to
+            val crawlerHeaders = mapOf(
+                "User-Agent" to "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)",
+                "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language" to "en-US,en;q=0.9",
+            )
+            val desktopHeaders = mapOf(
+                "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
+                "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language" to "en-US,en;q=0.9",
+                "Sec-Fetch-Site" to "none",
+            )
+            val mobileHeaders = mapOf(
+                "User-Agent" to "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
                 "Accept-Language" to "en-US",
-            )) ?: client.getText(url, mapOf(
-                "User-Agent" to "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15",
-            )) ?: return VideoExtractor.Result.Error("Could not load Threads post.")
+            )
 
-            val videoUrl = html.regexFind("""<video[^>]+src="([^"]+)"""")
-                ?: html.regexFind(""""video_url":"([^"]+)"""")?.unescape()
-                ?: html.regexFind("""(https://[^"\\]*fbcdn\.net/[^"\\]+\.mp4[^"\\]*)""")?.unescape()
-                ?: html.regexFind("""<meta property="og:video" content="([^"]+)"""")
+            var html = client.getText(cleanUrl, crawlerHeaders)
+            if (html == null || !html.contains(".mp4")) {
+                html = client.getText(cleanUrl, desktopHeaders)
+            }
+            if (html == null || !html.contains(".mp4")) {
+                val embedUrl = "${cleanUrl.trimEnd('/')}/embed"
+                html = client.getText(embedUrl, mobileHeaders) ?: client.getText(cleanUrl, mobileHeaders)
+            }
+
+            if (html == null) return VideoExtractor.Result.Error("Could not load Threads post.")
+
+            val videoUrl = html.regexFind("""<meta property="og:video" content="([^"]+)"""")
+                ?: html.regexFind("""<meta property="og:video:secure_url" content="([^"]+)"""")
+                ?: html.regexFind("""<meta property="og:video:url" content="([^"]+)"""")
+                ?: html.regexFind("""<video[^>]+src="([^"]+)"""")
+                ?: html.regexFind(""""video_versions":\s*\[\s*\{\s*"url":\s*"([^"]+)"""")?.unescape()
+                ?: html.regexFind(""""playback_url":\s*"([^"]+)"""")?.unescape()
+                ?: html.regexFind(""""video_url":\s*"([^"]+)"""")?.unescape()
+                ?: html.regexFind("""(https://[^"\\\s]*(?:fbcdn|cdninstagram)\.net/[^"\\\s]+\.mp4[^"\\\s]*)""")?.unescape()
                 ?: return VideoExtractor.Result.Error(
-                    "Threads requires login for this post.\n\n" +
-                    "Only public video posts work. Copy the post link from the Threads app and try again."
+                    "Threads video could not be found.\n\n" +
+                    "Make sure the post has a public video."
                 )
 
-            val title = html.regexFind("""<title>([^<]+)</title>""")
+            val cleanVideoUrl = videoUrl.replace("\\/", "/").replace("&amp;", "&")
+            val title = html.regexFind("""<meta property="og:title" content="([^"]+)"""")
                 ?: html.regexFind("""<meta property="og:description" content="([^"]+)"""")
+                ?: html.regexFind("""<title>([^<]+)</title>""")
                 ?: "Threads Video"
             val thumb = html.regexFind("""<meta property="og:image" content="([^"]+)"""")
 
             VideoExtractor.Result.Success(VideoInfo(
-                url = url, title = title.take(80), thumbnail = thumb, duration = null, uploader = null,
+                url = url,
+                title = title.take(80).replace(" • Threads", "").trim(),
+                thumbnail = thumb,
+                duration = null,
+                uploader = html.regexFind("""@([A-Za-z0-9_.]+)"""),
                 platform = Platform.THREADS,
                 formats = listOf(VideoFormat(
-                    formatId = "best", quality = "Best", ext = "mp4",
-                    filesize = null, fps = 30, vcodec = "h264", acodec = "aac",
-                    hasVideo = true, hasAudio = true, downloadUrl = videoUrl,
+                    formatId = "best",
+                    quality = "Best Quality",
+                    ext = "mp4",
+                    filesize = null,
+                    fps = 30,
+                    vcodec = "h264",
+                    acodec = "aac",
+                    hasVideo = true,
+                    hasAudio = true,
+                    downloadUrl = cleanVideoUrl,
                 )),
             ))
         } catch (e: Exception) {
