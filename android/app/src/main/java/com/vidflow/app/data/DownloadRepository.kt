@@ -12,15 +12,17 @@ import com.vidflow.app.data.db.DownloadRecord
 import com.vidflow.app.data.downloader.DownloadEngine
 import com.vidflow.app.data.downloader.DownloadProgress
 import com.vidflow.app.data.downloader.DownloadResult
+import com.vidflow.app.data.downloader.MediaMuxerMerger
+import com.vidflow.app.data.downloader.YtDlpJobs
 import com.vidflow.app.data.extractor.VideoExtractor
 import com.vidflow.app.data.model.DownloadStatus
 import com.vidflow.app.data.model.Platform
 import com.vidflow.app.data.model.VideoFormat
 import com.vidflow.app.data.model.VideoInfo
+import com.vidflow.app.data.session.SessionCookies
 import com.yausername.youtubedl_android.YoutubeDL
 import com.yausername.youtubedl_android.YoutubeDLRequest
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
@@ -40,7 +42,7 @@ class DownloadRepository(context: Context) {
         .build()
 
     private val extractor = VideoExtractor(httpClient, appContext)
-    private val engine    = DownloadEngine(appContext, httpClient)
+    private val engine = DownloadEngine(appContext, httpClient)
     private val dao: DownloadDao = AppDatabase.getInstance(appContext).downloadDao()
 
     // ── Extraction ────────────────────────────────────────────────────────────
@@ -51,20 +53,31 @@ class DownloadRepository(context: Context) {
 
     // ── Download ──────────────────────────────────────────────────────────────
 
+    /**
+     * @param existingRecordId when resuming a paused yt-dlp job, reuse the
+     *   same history row instead of inserting a duplicate.
+     */
     suspend fun startDownload(
         info: VideoInfo,
         format: VideoFormat,
         downloadUrl: String,
         downloadId: String = "",
+        existingRecordId: Long? = null,
         onProgress: suspend (DownloadProgress) -> Unit,
     ): Pair<Long, DownloadResult> = withContext(Dispatchers.IO) {
-        val record = DownloadRecord(
-            url = info.url, title = info.title, thumbnail = info.thumbnail,
-            platform = info.platform, quality = format.quality, ext = format.ext,
-            filePath = null, fileSize = null, duration = info.duration,
-            status = DownloadStatus.DOWNLOADING, progress = 0,
+        val id = existingRecordId ?: dao.insert(
+            DownloadRecord(
+                url = info.url, title = info.title, thumbnail = info.thumbnail,
+                platform = info.platform, quality = format.quality, ext = format.ext,
+                filePath = null, fileSize = null, duration = info.duration,
+                status = DownloadStatus.DOWNLOADING, progress = 0,
+            ),
         )
-        val id = dao.insert(record)
+        var lastPct = 0
+        val sink: suspend (DownloadProgress) -> Unit = { p ->
+            lastPct = p.percent.coerceIn(0, 100)
+            onProgress(p)
+        }
 
         // Resolve download URL for Pinterest
         val resolvedUrl = if (info.platform == Platform.PINTEREST) {
@@ -79,7 +92,7 @@ class DownloadRepository(context: Context) {
         val result = when {
             // MP3 / Audio extraction always goes through yt-dlp with --extract-audio
             isMp3 -> {
-                downloadWithYtDlpAudio(info.url, info.title, id, onProgress)
+                downloadWithYtDlpAudio(info, id, downloadId, sink)
             }
             // Explicitly marked as needing yt-dlp (DASH merge, HD, etc.)
             format.needsYtDlp -> {
@@ -88,7 +101,7 @@ class DownloadRepository(context: Context) {
                     else if (!format.hasVideo && format.hasAudio) format.formatId
                     else format.formatId.ifEmpty { "bestvideo+bestaudio/best" }
                 }
-                downloadWithYtDlp(info.url, info.title, selector, format.ext, id, onProgress)
+                downloadWithYtDlp(info, selector, format, id, downloadId, sink)
             }
             // YouTube with blank URL (legacy path)
             info.platform == Platform.YOUTUBE && downloadUrl.isBlank() -> {
@@ -97,20 +110,32 @@ class DownloadRepository(context: Context) {
                         "${format.formatId}+bestaudio[ext=m4a]/${format.formatId}+bestaudio/bestvideo+bestaudio"
                     else format.formatId.ifEmpty { "bestvideo+bestaudio/best" }
                 }
-                downloadWithYtDlp(info.url, info.title, selector, format.ext, id, onProgress)
+                downloadWithYtDlp(info, selector, format, id, downloadId, sink)
             }
-            // Direct HTTP download (fast path via OkHttp)
+            // Direct HTTP download (fast path via OkHttp, Range-resumable)
             else -> engine.download(info, format, resolvedUrl, downloadId.ifEmpty { id.toString() }) { progress ->
                 dao.updateProgress(id, DownloadStatus.DOWNLOADING, progress.percent.coerceIn(0, 99))
-                onProgress(progress)
+                sink(progress)
             }
         }
 
         when (result) {
-            is DownloadResult.Success   -> dao.markCompleted(id, DownloadStatus.COMPLETED,
-                result.filePath, result.fileSize, System.currentTimeMillis())
-            is DownloadResult.Error     -> dao.updateError(id, DownloadStatus.FAILED, result.message)
-            is DownloadResult.Cancelled -> dao.updateError(id, DownloadStatus.CANCELLED, "Cancelled by user")
+            is DownloadResult.Success -> dao.markCompleted(
+                id, DownloadStatus.COMPLETED,
+                result.filePath, result.fileSize, System.currentTimeMillis(),
+            )
+            is DownloadResult.Error -> dao.updateError(id, DownloadStatus.FAILED, result.message)
+            is DownloadResult.Cancelled -> {
+                dao.updateError(id, DownloadStatus.CANCELLED, "Cancelled by user")
+                // Cancel is the only action that deletes partial data.
+                YtDlpJobs.deletePartFiles(appContext, downloadId.ifEmpty { id.toString() })
+                engine.deletePartFile(downloadId.ifEmpty { id.toString() })
+                YtDlpJobs.forget(downloadId.ifEmpty { id.toString() })
+            }
+            is DownloadResult.Paused -> {
+                // Keep the row + every .part file. Resume reuses both.
+                dao.updateProgress(id, DownloadStatus.DOWNLOADING, lastPct.coerceIn(0, 99))
+            }
         }
 
         Pair(id, result)
@@ -129,165 +154,302 @@ class DownloadRepository(context: Context) {
         }
     }
 
+    // ── yt-dlp plumbing ───────────────────────────────────────────────────────
+
+    /** Outcome of one blocking yt-dlp execute() call. */
+    private sealed class YtDlpOutcome {
+        object Finished : YtDlpOutcome()
+        object Paused : YtDlpOutcome()
+        object Cancelled : YtDlpOutcome()
+        data class Failed(val message: String) : YtDlpOutcome()
+    }
+
+    /**
+     * Runs one yt-dlp command with a stable process id. The process id is
+     * what pause/cancel kill via YtDlpJobs; the same id is reused on resume.
+     *
+     * @param percentMap remaps yt-dlp's 0..100 progress (used by the
+     *   split-download path: video 0..45, audio 45..90, merge 90..99).
+     */
+    private fun executeYtDlp(
+        request: YoutubeDLRequest,
+        processId: String,
+        downloadId: String,
+        dbId: Long,
+        percentMap: (Int) -> Int = { it },
+        onProgress: suspend (DownloadProgress) -> Unit,
+    ): YtDlpOutcome {
+        YtDlpJobs.register(downloadId, processId)
+        var lastPct = -1
+        var totalBytesParsed = -1L
+        var merging = false
+        try {
+            YoutubeDL.getInstance().execute(request, processId) { progress, _, line ->
+                if (line != null && (line.contains("[Merger]") || line.contains("Merging formats"))) {
+                    merging = true
+                }
+                val rawPct = progress.toInt().coerceIn(0, 100)
+                val pct = if (merging) lastPct.coerceAtLeast(0) else percentMap(rawPct)
+                val mapped = pct.coerceIn(0, 99)
+                if (mapped != lastPct || merging) {
+                    lastPct = mapped
+                    val parsedTotal = parseBytesFromLog(line)
+                    if (parsedTotal > 0) totalBytesParsed = parsedTotal
+                    // During merge there is no download speed: report none
+                    // (the UI shows "Merging..." instead of 0 KB/s).
+                    val speed = if (merging) 0L else parseSpeedFromLog(line)
+                    val downloaded = if (totalBytesParsed > 0 && !merging) {
+                        (totalBytesParsed * mapped) / 100
+                    } else if (totalBytesParsed > 0) {
+                        totalBytesParsed
+                    } else {
+                        0L
+                    }
+                    runBlocking {
+                        dao.updateProgress(dbId, DownloadStatus.DOWNLOADING, mapped)
+                        onProgress(
+                            DownloadProgress(
+                                downloaded, totalBytesParsed, speed, mapped,
+                                isMerging = merging,
+                            ),
+                        )
+                    }
+                }
+            }
+        } catch (e: Exception) {
+            // A killed process surfaces here as an exception. Pause/cancel
+            // win over "failed": they are user actions, not errors.
+            if (YtDlpJobs.isCancelled(downloadId)) return YtDlpOutcome.Cancelled
+            if (YtDlpJobs.isPaused(downloadId)) return YtDlpOutcome.Paused
+            Log.w("VidFlow/YtDlp", "execute failed: ${e.message}")
+            return YtDlpOutcome.Failed("yt-dlp failed: ${e.message?.take(120)}")
+        } finally {
+            YtDlpJobs.unregister(downloadId, processId)
+        }
+        if (YtDlpJobs.isCancelled(downloadId)) return YtDlpOutcome.Cancelled
+        if (YtDlpJobs.isPaused(downloadId)) return YtDlpOutcome.Paused
+        return YtDlpOutcome.Finished
+    }
+
+    private fun YoutubeDLRequest.withCommonOptions(
+        info: VideoInfo,
+        downloadId: String,
+    ): YoutubeDLRequest {
+        addOption("--no-playlist")
+        addOption("--no-warnings")
+        addOption("--no-check-certificates")
+        addOption("--socket-timeout", "30")
+        addOption("--extractor-retries", "3")
+        // Resume: never delete .part files on pause; --continue reuses them.
+        addOption("--continue")
+        addOption("--fragment-retries", "10")
+        SessionCookies.writeCookiesTxt(appContext, info.platform)?.let { cookies ->
+            addOption("--cookies", cookies.absolutePath)
+        }
+        return this
+    }
+
+    private fun findProduced(template: String, extensions: List<String>): File? {
+        val dir = File(template).parentFile ?: return null
+        val base = File(template).name
+        return extensions.map { ext -> File(dir, "$base.$ext") }
+            .firstOrNull { it.exists() && it.length() > 0 }
+            ?: dir.listFiles { f -> f.name.startsWith(base) && !f.name.contains(".part") }
+                ?.firstOrNull { it.length() > 0 }
+    }
+
     /**
      * Downloads MP3 audio using yt-dlp with --extract-audio --audio-format mp3.
      * This is the correct way to get an actual .mp3 file from any platform.
      */
     private suspend fun downloadWithYtDlpAudio(
-        videoUrl: String,
-        title: String,
+        info: VideoInfo,
         dbId: Long,
+        downloadId: String,
         onProgress: suspend (DownloadProgress) -> Unit,
     ): DownloadResult = withContext(Dispatchers.IO) {
-        val safeTitle = title.replace(Regex("[\\\\/:*?\"<>|]"), "_").trim().take(60).ifEmpty { "audio" }
-        val tempId    = System.currentTimeMillis()
-        val tempDir   = appContext.cacheDir
-        val outputTemplate = "${tempDir.absolutePath}/vf_${tempId}"
+        val safeTitle = info.title.replace(Regex("[\\\\/:*?\"<>|]"), "_").trim().take(60).ifEmpty { "audio" }
+        val key = downloadId.ifEmpty { dbId.toString() }
+        val outputTemplate = YtDlpJobs.templateFor(appContext, key)
+        Log.d("VidFlow/YtDlp-MP3", "Start MP3 download: ${info.url}")
 
-        Log.d("VidFlow/YtDlp-MP3", "Start MP3 download: $videoUrl")
-
-        try {
-            val request = YoutubeDLRequest(videoUrl).apply {
-                addOption("-f", "bestaudio/best")
-                addOption("-o", "${outputTemplate}.%(ext)s")
-                addOption("--extract-audio")
-                addOption("--audio-format", "mp3")
-                addOption("--audio-quality", "0")  // best quality
-                addOption("--no-playlist")
-                addOption("--no-warnings")
-                addOption("--no-check-certificates")
-                addOption("--socket-timeout", "30")
-            }
-
-            var lastPct = -1
-            var totalBytesParsed = -1L
-            YoutubeDL.getInstance().execute(request, videoUrl) { progress, _, line ->
-                val pct = progress.toInt().coerceIn(0, 99)
-                if (pct != lastPct) {
-                    lastPct = pct
-                    val parsedTotal = parseBytesFromLog(line)
-                    if (parsedTotal > 0) totalBytesParsed = parsedTotal
-                    val speed = parseSpeedFromLog(line)
-                    val downloaded = if (totalBytesParsed > 0) (totalBytesParsed * pct) / 100 else 0L
-                    runBlocking {
-                        dao.updateProgress(dbId, DownloadStatus.DOWNLOADING, pct)
-                        onProgress(DownloadProgress(downloaded, totalBytesParsed, speed, pct))
-                    }
-                }
-            }
-
-            // Find the mp3 output file
-            val outputFile = listOf("mp3", "m4a", "opus", "webm")
-                .map { e -> File("${outputTemplate}.$e") }
-                .firstOrNull { it.exists() }
-                ?: tempDir.listFiles { f -> f.name.startsWith("vf_${tempId}") }?.firstOrNull()
-
-            if (outputFile == null || !outputFile.exists()) {
-                return@withContext DownloadResult.Error(
-                    "MP3 extraction failed: output file not found. Ensure FFmpeg is initialized."
-                )
-            }
-
-            val fileSize = outputFile.length()
-            val fileName = "${safeTitle}.mp3"
-            val finalPath = saveToDownloads(outputFile, fileName, "audio/mpeg")
-            outputFile.delete()
-
-            onProgress(DownloadProgress(fileSize, fileSize, 0L, 100))
-            Log.d("VidFlow/YtDlp-MP3", "Done: $finalPath (${fileSize / 1024}KB)")
-            DownloadResult.Success(finalPath, fileSize)
-
-        } catch (e: Exception) {
-            Log.e("VidFlow/YtDlp-MP3", "Failed: ${e.message}", e)
-            DownloadResult.Error("MP3 download failed: ${e.message?.take(100)}")
+        val request = YoutubeDLRequest(info.url).apply {
+            addOption("-f", "bestaudio/best")
+            addOption("-o", "${outputTemplate}.%(ext)s")
+            addOption("--extract-audio")
+            addOption("--audio-format", "mp3")
+            addOption("--audio-quality", "0") // best quality
+            withCommonOptions(info, key)
         }
+        when (val outcome = executeYtDlp(request, "ytdlp_${key}_audio", key, dbId, onProgress = onProgress)) {
+            is YtDlpOutcome.Paused -> return@withContext DownloadResult.Paused
+            is YtDlpOutcome.Cancelled -> return@withContext DownloadResult.Cancelled
+            is YtDlpOutcome.Failed -> return@withContext DownloadResult.Error("MP3 download failed: ${outcome.message}")
+            is YtDlpOutcome.Finished -> Unit
+        }
+
+        val outputFile = findProduced(outputTemplate, listOf("mp3", "m4a", "opus", "webm"))
+            ?: return@withContext DownloadResult.Error(
+                "MP3 extraction failed: output file not found. Ensure FFmpeg is initialized.",
+            )
+        val fileSize = outputFile.length()
+        val finalPath = saveToDownloads(outputFile, "$safeTitle.mp3", "audio/mpeg")
+        outputFile.delete()
+        YtDlpJobs.forget(key)
+
+        onProgress(DownloadProgress(fileSize, fileSize, 0L, 100))
+        Log.d("VidFlow/YtDlp-MP3", "Done: $finalPath (${fileSize / 1024}KB)")
+        DownloadResult.Success(finalPath, fileSize)
     }
 
     /**
-     * Downloads using yt-dlp execute() — handles:
-     * - YouTube DASH 1080p/720p (video+audio merge via FFmpeg)
-     * - Facebook DASH (audio+video separate streams)
-     * - Threads, Instagram, any platform with separate streams
-     *
-     * Progress reports 0→99% from yt-dlp callback (FFmpeg merge has no progress),
-     * then 100% when file is ready.
+     * Downloads using yt-dlp. For combined video+audio selectors (DASH),
+     * video and audio are downloaded as two separate files and then merged
+     * by the on-device MediaMuxer step with real merge progress; if that
+     * merge cannot handle the codecs, yt-dlp's own merge is the fallback.
+     * Single-format selectors go straight through yt-dlp.
      */
     private suspend fun downloadWithYtDlp(
-        videoUrl: String,
-        title: String,
+        info: VideoInfo,
         formatSelector: String,
-        ext: String,
+        format: VideoFormat,
         dbId: Long,
+        downloadId: String,
         onProgress: suspend (DownloadProgress) -> Unit,
     ): DownloadResult = withContext(Dispatchers.IO) {
-        val safeTitle = title.replace(Regex("[\\\\/:*?\"<>|]"), "_").trim().take(60).ifEmpty { "video" }
-        val tempId    = System.currentTimeMillis()
-        val tempDir   = appContext.cacheDir
-        val outputTemplate = "${tempDir.absolutePath}/vf_${tempId}"
+        val safeTitle = info.title.replace(Regex("[\\\\/:*?\"<>|]"), "_").trim().take(60).ifEmpty { "video" }
+        val key = downloadId.ifEmpty { dbId.toString() }
+        val outputTemplate = YtDlpJobs.templateFor(appContext, key)
+        Log.d("VidFlow/YtDlp", "Start: $formatSelector | ${info.url}")
 
-        Log.d("VidFlow/YtDlp", "Start: $formatSelector | $videoUrl")
+        // Split path only for combined selectors (a '+' joins video+audio).
+        if (formatSelector.contains("+")) {
+            val split = downloadSplitAndMux(info, format, key, outputTemplate, dbId, onProgress)
+            if (split != null) return@withContext split
+            // split == null means muxing was impossible for these codecs:
+            // fall through to yt-dlp's own merge below (parts are reused).
+            Log.d("VidFlow/YtDlp", "Split mux unavailable, falling back to yt-dlp merge")
+        }
 
-        try {
-            val request = YoutubeDLRequest(videoUrl).apply {
-                addOption("-f",  formatSelector)
-                addOption("-o",  "${outputTemplate}.%(ext)s")
-                addOption("--no-playlist")
-                addOption("--merge-output-format", "mp4")
-                addOption("--no-warnings")
-                addOption("--no-check-certificates")
-                addOption("--socket-timeout", "30")
-                addOption("--extractor-retries", "3")
+        val request = YoutubeDLRequest(info.url).apply {
+            addOption("-f", formatSelector)
+            addOption("-o", "${outputTemplate}.%(ext)s")
+            addOption("--merge-output-format", "mp4")
+            withCommonOptions(info, key)
+        }
+        when (val outcome = executeYtDlp(request, "ytdlp_$key", key, dbId, onProgress = onProgress)) {
+            is YtDlpOutcome.Paused -> return@withContext DownloadResult.Paused
+            is YtDlpOutcome.Cancelled -> return@withContext DownloadResult.Cancelled
+            is YtDlpOutcome.Failed -> return@withContext DownloadResult.Error(outcome.message)
+            is YtDlpOutcome.Finished -> Unit
+        }
+
+        val outputFile = findProduced(outputTemplate, listOf("mp4", "mkv", "webm", "m4a", "mp3"))
+            ?: return@withContext DownloadResult.Error(
+                "Merge failed: output file not found. Ensure FFmpeg is initialized.",
+            )
+        val fileSize = outputFile.length()
+        val fileName = "${safeTitle}.${outputFile.extension.ifEmpty { "mp4" }}"
+        val mimeType = when (outputFile.extension.lowercase()) {
+            "mp3" -> "audio/mpeg"
+            "m4a" -> "audio/mp4"
+            "opus" -> "audio/opus"
+            else -> "video/mp4"
+        }
+        val finalPath = saveToDownloads(outputFile, fileName, mimeType)
+        outputFile.delete()
+        YtDlpJobs.forget(key)
+
+        onProgress(DownloadProgress(fileSize, fileSize, 0L, 100))
+        Log.d("VidFlow/YtDlp", "Done: $finalPath (${fileSize / 1024}KB)")
+        DownloadResult.Success(finalPath, fileSize)
+    }
+
+    /**
+     * Split DASH download + separate merge step.
+     * Returns null ONLY when the merge itself is impossible (codec/container
+     * the muxer cannot handle) — the caller then falls back to yt-dlp merge.
+     * Pause/Cancel propagate as results, never as null.
+     */
+    private suspend fun downloadSplitAndMux(
+        info: VideoInfo,
+        format: VideoFormat,
+        key: String,
+        outputTemplate: String,
+        dbId: Long,
+        onProgress: suspend (DownloadProgress) -> Unit,
+    ): DownloadResult? = withContext(Dispatchers.IO) {
+        val height = Regex("""(\d{3,4})p""").find(format.quality)?.groupValues?.get(1)?.toIntOrNull()
+        val videoSelector = if (height != null) "bestvideo[height<=$height]/bestvideo" else "bestvideo"
+        val audioSelector = "bestaudio/best"
+        val videoTemplate = "${outputTemplate}_v"
+        val audioTemplate = "${outputTemplate}_a"
+
+        val videoRequest = YoutubeDLRequest(info.url).apply {
+            addOption("-f", videoSelector)
+            addOption("-o", "${videoTemplate}.%(ext)s")
+            withCommonOptions(info, key)
+        }
+        when (val outcome = executeYtDlp(
+            videoRequest, "ytdlp_${key}_v", key, dbId,
+            percentMap = { (it * 45) / 100 }, onProgress = onProgress,
+        )) {
+            is YtDlpOutcome.Paused -> return@withContext DownloadResult.Paused
+            is YtDlpOutcome.Cancelled -> return@withContext DownloadResult.Cancelled
+            is YtDlpOutcome.Failed -> {
+                // A single-format failure here must not kill the whole job:
+                // the classic merged path below gets its own chance.
+                Log.w("VidFlow/YtDlp", "Split video fetch failed, fallback: ${outcome.message}")
+                return@withContext null
             }
+            is YtDlpOutcome.Finished -> Unit
+        }
+        val videoFile = findProduced(videoTemplate, listOf("mp4", "mkv", "webm"))
+            ?: return@withContext null
 
-            var lastPct = -1
-            var totalBytesParsed = -1L
-            YoutubeDL.getInstance().execute(request, videoUrl) { progress, _, line ->
-                val pct = progress.toInt().coerceIn(0, 99)
-                if (pct != lastPct || line != null) {
-                    lastPct = pct
-                    val parsedTotal = parseBytesFromLog(line)
-                    if (parsedTotal > 0) totalBytesParsed = parsedTotal
-                    val speed = parseSpeedFromLog(line)
-                    val downloaded = if (totalBytesParsed > 0) (totalBytesParsed * pct) / 100 else 0L
-                    runBlocking {
-                        dao.updateProgress(dbId, DownloadStatus.DOWNLOADING, pct)
-                        onProgress(DownloadProgress(downloaded, totalBytesParsed, speed, pct))
-                    }
+        val audioRequest = YoutubeDLRequest(info.url).apply {
+            addOption("-f", audioSelector)
+            addOption("-o", "${audioTemplate}.%(ext)s")
+            withCommonOptions(info, key)
+        }
+        when (val outcome = executeYtDlp(
+            audioRequest, "ytdlp_${key}_a", key, dbId,
+            percentMap = { 45 + (it * 45) / 100 }, onProgress = onProgress,
+        )) {
+            is YtDlpOutcome.Paused -> return@withContext DownloadResult.Paused
+            is YtDlpOutcome.Cancelled -> return@withContext DownloadResult.Cancelled
+            is YtDlpOutcome.Failed -> {
+                Log.w("VidFlow/YtDlp", "Split audio fetch failed, fallback: ${outcome.message}")
+                return@withContext null
+            }
+            is YtDlpOutcome.Finished -> Unit
+        }
+        val audioFile = findProduced(audioTemplate, listOf("m4a", "mp4", "webm", "opus"))
+            ?: return@withContext null
+
+        // Separate merge step with real progress (brief 3.2, via MediaMuxer).
+        val merged = File("${outputTemplate}.merged.mp4")
+        var lastMuxPct = -1
+        val muxed = MediaMuxerMerger.merge(videoFile, audioFile, merged) { muxPct ->
+            val overall = 90 + (muxPct * 9) / 100
+            if (overall != lastMuxPct) {
+                lastMuxPct = overall
+                runBlocking {
+                    dao.updateProgress(dbId, DownloadStatus.DOWNLOADING, overall)
+                    onProgress(DownloadProgress(0L, -1L, 0L, overall, isMerging = true))
                 }
             }
+        } ?: return@withContext null
 
-            // Find the merged output file
-            val outputFile = listOf("mp4", "mkv", "webm", "m4a", "mp3")
-                .map { e -> File("${outputTemplate}.$e") }
-                .firstOrNull { it.exists() }
-                ?: tempDir.listFiles { f -> f.name.startsWith("vf_${tempId}") }?.firstOrNull()
-
-            if (outputFile == null || !outputFile.exists()) {
-                return@withContext DownloadResult.Error(
-                    "Merge failed: output file not found. Ensure FFmpeg is initialized."
-                )
-            }
-
-            val fileSize = outputFile.length()
-            val fileName = "${safeTitle}.${outputFile.extension.ifEmpty { "mp4" }}"
-            val mimeType = when (outputFile.extension.lowercase()) {
-                "mp3"  -> "audio/mpeg"
-                "m4a"  -> "audio/mp4"
-                "opus" -> "audio/opus"
-                else   -> "video/mp4"
-            }
-
-            val finalPath = saveToDownloads(outputFile, fileName, mimeType)
-            outputFile.delete()
-
-            onProgress(DownloadProgress(fileSize, fileSize, 0L, 100))
-            Log.d("VidFlow/YtDlp", "Done: $finalPath (${fileSize / 1024}KB)")
-            DownloadResult.Success(finalPath, fileSize)
-
-        } catch (e: Exception) {
-            Log.e("VidFlow/YtDlp", "Failed: ${e.message}", e)
-            DownloadResult.Error("yt-dlp download failed: ${e.message?.take(100)}")
-        }
+        val safeTitle = info.title.replace(Regex("[\\\\/:*?\"<>|]"), "_").trim().take(60).ifEmpty { "video" }
+        val fileSize = muxed.length()
+        val finalPath = saveToDownloads(muxed, "$safeTitle.mp4", "video/mp4")
+        runCatching { muxed.delete() }
+        runCatching { videoFile.delete() }
+        runCatching { audioFile.delete() }
+        YtDlpJobs.forget(key)
+        onProgress(DownloadProgress(fileSize, fileSize, 0L, 100))
+        DownloadResult.Success(finalPath, fileSize)
     }
 
     /** Saves a file to Downloads/VidFlow/ via scoped storage (Android 10+) or legacy path. */
@@ -300,10 +462,11 @@ class DownloadRepository(context: Context) {
                 put(MediaStore.MediaColumns.RELATIVE_PATH, "${Environment.DIRECTORY_DOWNLOADS}/VidFlow")
                 put(MediaStore.MediaColumns.IS_PENDING, 1)
             }
-            val collectionUri = if (isAudio)
+            val collectionUri = if (isAudio) {
                 MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
-            else
+            } else {
                 MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+            }
 
             val uri = appContext.contentResolver.insert(collectionUri, cv)
                 ?: error("MediaStore insert returned null for $fileName")
@@ -312,13 +475,13 @@ class DownloadRepository(context: Context) {
                 src.inputStream().use { it.copyTo(out) }
             }
             appContext.contentResolver.update(
-                uri, ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }, null, null
+                uri, ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }, null, null,
             )
             uri.toString()
         } else {
             @Suppress("DEPRECATION")
             val dir = File(
-                Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "VidFlow"
+                Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "VidFlow",
             )
             dir.mkdirs()
             val dest = File(dir, fileName)
@@ -329,11 +492,11 @@ class DownloadRepository(context: Context) {
 
     // ── History ───────────────────────────────────────────────────────────────
 
-    fun getAllDownloads(): Flow<List<DownloadRecord>>     = dao.getAllRecords()
-    fun getActiveDownloads(): Flow<List<DownloadRecord>> = dao.getActiveDownloads()
-    fun getCompletedDownloads(): Flow<List<DownloadRecord>> = dao.getCompletedDownloads()
+    fun getAllDownloads(): kotlinx.coroutines.flow.Flow<List<DownloadRecord>> = dao.getAllRecords()
+    fun getActiveDownloads(): kotlinx.coroutines.flow.Flow<List<DownloadRecord>> = dao.getActiveDownloads()
+    fun getCompletedDownloads(): kotlinx.coroutines.flow.Flow<List<DownloadRecord>> = dao.getCompletedDownloads()
     suspend fun deleteRecord(id: Long) = dao.delete(id)
-    suspend fun clearHistory()         = dao.clearHistory()
+    suspend fun clearHistory() = dao.clearHistory()
 
     private fun parseBytesFromLog(line: String?): Long {
         if (line == null) return -1L

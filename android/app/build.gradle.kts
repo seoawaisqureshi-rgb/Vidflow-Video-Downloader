@@ -37,6 +37,11 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
+    testOptions {
+        // Unit tests run on the JVM: Android framework calls (Log, CookieManager)
+        // return default values instead of throwing "not mocked".
+        unitTests.isReturnDefaultValues = true
+    }
     buildFeatures {
       compose = true
       buildConfig = true

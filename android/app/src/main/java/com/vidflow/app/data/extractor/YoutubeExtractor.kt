@@ -7,10 +7,9 @@ import com.vidflow.app.data.model.VideoFormat
 import com.vidflow.app.data.model.VideoInfo
 import com.yausername.youtubedl_android.YoutubeDL
 import com.yausername.youtubedl_android.YoutubeDLRequest
+import com.vidflow.app.data.session.SessionCookies
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.async
-import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaTypeOrNull
 import okhttp3.OkHttpClient
 import okhttp3.RequestBody.Companion.toRequestBody
@@ -23,34 +22,34 @@ import org.json.JSONObject
  *
  * Speed strategy (matching TubeMate/VidMate approach):
  * 1. Hit InnerTube API directly → get plain CDN URLs immediately
- * 2. If InnerTube fails (ciphered/age-gated) → yt-dlp fallback
- * Both run in parallel; first success wins.
+ * 2. Only if InnerTube fails (ciphered/age-gated) → yt-dlp fallback
+ * Sequential, never parallel: the fast path alone is instant.
  */
 internal class YoutubeExtractor(
     private val client: OkHttpClient,
     private val context: Context? = null,
 ) {
 
-    suspend fun extract(url: String): VideoExtractor.Result = coroutineScope {
-        // Run InnerTube (fast) and yt-dlp (slow but reliable) in parallel
-        val innerDeferred = async(Dispatchers.IO) { tryInnerTube(url) }
-        val ytdlpDeferred = async(Dispatchers.IO) {
-            if (context == null) return@async null
-            // Only start yt-dlp after 2.5s if InnerTube hasn't returned yet
-            kotlinx.coroutines.delay(2500)
-            withTimeoutOrNull(18_000L) { tryYtDlp(url, context) }
-        }
-
-        val inner = innerDeferred.await()
+    /**
+     * Ordered chain (brief 3.4): the InnerTube fast path runs FIRST, alone,
+     * with a 15s timeout. Only if it fails does yt-dlp run, with a 30s
+     * timeout. No parallel run, no 2.5s delayed-fallback timer: a timer is
+     * not an architecture, and racing two extractors doubled CPU and
+     * network use on every YouTube link.
+     */
+    suspend fun extract(url: String): VideoExtractor.Result = withContext(Dispatchers.IO) {
+        val inner = runBlockingWithTimeout(15_000L) { tryInnerTube(url) }
         if (inner is VideoExtractor.Result.Success && inner.info.formats.isNotEmpty()) {
-            ytdlpDeferred.cancel()
-            return@coroutineScope inner
+            return@withContext inner
         }
 
-        // InnerTube failed — wait for yt-dlp
-        val ytdlp = ytdlpDeferred.await()
+        val ytdlp = if (context != null) {
+            runBlockingWithTimeout(30_000L) { tryYtDlp(url, context) }
+        } else {
+            null
+        }
         if (ytdlp is VideoExtractor.Result.Success && ytdlp.info.formats.isNotEmpty()) {
-            return@coroutineScope ytdlp
+            return@withContext ytdlp
         }
 
         inner ?: VideoExtractor.Result.Error("YouTube extraction failed. Check your internet connection and try again.")
@@ -66,6 +65,9 @@ internal class YoutubeExtractor(
                 addOption("--no-check-certificates")
                 addOption("--socket-timeout", "20")
                 addOption("--extractor-retries", "2")
+                SessionCookies.writeCookiesTxt(context, Platform.YOUTUBE)?.let { cookies ->
+                    addOption("--cookies", cookies.absolutePath)
+                }
             }
             val response = YoutubeDL.getInstance().getInfo(request)
 

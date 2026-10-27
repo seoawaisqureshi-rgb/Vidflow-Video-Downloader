@@ -169,11 +169,11 @@ private fun HistoryItem(
 private fun StatusChip(status: DownloadStatus) {
     val (color, label) = when (status) {
         DownloadStatus.COMPLETED     -> Pair(Success, "Done")
-        DownloadStatus.DOWNLOADING   -> Pair(Cyan, "Downloading")
+        DownloadStatus.DOWNLOADING   -> Pair(AccentDeep, "Downloading")
         DownloadStatus.FAILED        -> Pair(Error, "Failed")
         DownloadStatus.CANCELLED     -> Pair(TextMuted, "Cancelled")
         DownloadStatus.QUEUED        -> Pair(Warning, "Queued")
-        DownloadStatus.FETCHING_INFO -> Pair(Violet, "Fetching…")
+        DownloadStatus.FETCHING_INFO -> Pair(Accent, "Fetching…")
     }
     Box(
         modifier = Modifier

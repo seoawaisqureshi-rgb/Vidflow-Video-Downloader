@@ -5,9 +5,11 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.AccountCircle
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.FolderOpen
 import androidx.compose.material.icons.rounded.History
+import androidx.compose.material.icons.rounded.Language
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
@@ -17,7 +19,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.vidflow.app.theme.*
+import com.vidflow.app.ui.browser.BrowserScreen
 import com.vidflow.app.ui.history.HistoryScreen
+import com.vidflow.app.ui.login.LoginWebViewScreen
 import com.vidflow.app.ui.history.HistoryViewModel
 import com.vidflow.app.ui.home.HomeScreen
 import com.vidflow.app.ui.home.HomeViewModel
@@ -25,6 +29,8 @@ import java.io.File
 
 private enum class NavTab(val label: String, val icon: ImageVector) {
     HOME("Download", Icons.Rounded.Download),
+    BROWSER("Browser", Icons.Rounded.Language),
+    LOGIN("Login", Icons.Rounded.AccountCircle),
     FOLDER("Folder", Icons.Rounded.FolderOpen),
     HISTORY("History", Icons.Rounded.History),
 }
@@ -54,7 +60,19 @@ fun MainNavigation(
         },
     ) { innerPadding ->
         when (selectedTab) {
-            NavTab.HOME    -> HomeScreen(viewModel = homeVm, modifier = Modifier.padding(innerPadding))
+            NavTab.HOME    -> HomeScreen(
+                viewModel = homeVm,
+                modifier = Modifier.padding(innerPadding),
+                onOpenLogin = { selectedTab = NavTab.LOGIN },
+            )
+            NavTab.BROWSER -> BrowserScreen(
+                modifier = Modifier.padding(innerPadding),
+                onDownloadDetected = { url ->
+                    homeVm.analyzeUrl(url)
+                    selectedTab = NavTab.HOME
+                },
+            )
+            NavTab.LOGIN   -> LoginWebViewScreen(modifier = Modifier.padding(innerPadding))
             NavTab.HISTORY -> HistoryScreen(viewModel = historyVm, modifier = Modifier.padding(innerPadding))
             NavTab.FOLDER  -> HomeScreen(viewModel = homeVm, modifier = Modifier.padding(innerPadding))
         }
@@ -91,11 +109,11 @@ private fun VidFlowBottomBar(
                     },
                     label = { Text(tab.label) },
                     colors = NavigationBarItemDefaults.colors(
-                        selectedIconColor   = Violet,
-                        selectedTextColor   = Violet,
-                        unselectedIconColor = if (tab == NavTab.FOLDER) Cyan else TextMuted,
-                        unselectedTextColor = if (tab == NavTab.FOLDER) Cyan else TextMuted,
-                        indicatorColor      = VioletGlow,
+                        selectedIconColor   = Accent,
+                        selectedTextColor   = Accent,
+                        unselectedIconColor = if (tab == NavTab.FOLDER) AccentDeep else TextMuted,
+                        unselectedTextColor = if (tab == NavTab.FOLDER) AccentDeep else TextMuted,
+                        indicatorColor      = AccentGlow,
                     ),
                 )
             }

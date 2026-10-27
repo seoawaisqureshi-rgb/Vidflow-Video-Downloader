@@ -10,6 +10,7 @@ import android.util.Log
 import com.vidflow.app.VidFlowApplication
 import com.vidflow.app.data.downloader.DownloadProgress
 import com.vidflow.app.data.downloader.DownloadResult
+import com.vidflow.app.data.downloader.YtDlpJobs
 import com.vidflow.app.data.model.VideoFormat
 import com.vidflow.app.data.model.VideoInfo
 import com.vidflow.app.notifications.NotificationHelper
@@ -38,6 +39,8 @@ sealed class ServiceState {
         val speedKBps: Long,
         val bytesDownloaded: Long = 0L,
         val totalBytes: Long = -1L,
+        /** True during the merge step: UI shows "Merging..." and no speed. */
+        val isMerging: Boolean = false,
     ) : ServiceState()
     data class Paused(
         val percent: Int,
@@ -62,6 +65,13 @@ data class DownloadRequest(
     val downloadUrl: String,
 )
 
+/** A paused yt-dlp job: everything resume needs to restart it. */
+private data class PausedJob(
+    val request: DownloadRequest,
+    val dbId: Long,
+    val notifId: Int,
+)
+
 // ── Foreground Download Service ──────────────────────────────────────────────
 
 class DownloadService : Service() {
@@ -83,6 +93,9 @@ class DownloadService : Service() {
             val id = intent.getStringExtra(EXTRA_DOWNLOAD_ID)
             if (id != null) {
                 pausedIds.add(id)
+                // Real pause (brief 3.1): kill the yt-dlp process tree.
+                // .part files are deliberately kept for resume.
+                YtDlpJobs.pause(id)
                 _downloads.update { current ->
                     current[id]?.let { entry ->
                         val s = entry.state
@@ -101,16 +114,40 @@ class DownloadService : Service() {
             val id = intent.getStringExtra(EXTRA_DOWNLOAD_ID)
             if (id != null) {
                 pausedIds.remove(id)
-                _downloads.update { current ->
-                    current[id]?.let { entry ->
-                        val s = entry.state
-                        val resuming = if (s is ServiceState.Paused)
-                            ServiceState.Downloading(s.percent, 0, s.bytesDownloaded, s.totalBytes)
-                        else entry.state
-                        current + (id to entry.copy(state = resuming))
-                    } ?: current
+                YtDlpJobs.clearPaused(id)
+                val pausedJob = pausedRequests.remove(id)
+                if (pausedJob != null) {
+                    // yt-dlp pause killed the process: resume means re-running
+                    // the same command with --continue on the same template,
+                    // so it continues from the kept .part files, not zero.
+                    val relaunchNotifId = pausedJob.notifId
+                    downloadNotifIds[id] = relaunchNotifId
+                    startForeground(
+                        relaunchNotifId,
+                        NotificationHelper.progressNotification(
+                            this, pausedJob.request.info.title, 0, 0, 0L, -1L,
+                        ),
+                    )
+                    activeCount.incrementAndGet()
+                    val job = serviceScope.launch {
+                        processDownload(id, relaunchNotifId, pausedJob.request, pausedJob.dbId)
+                    }
+                    downloadJobs[id] = job
+                    Log.d(TAG, "Resumed yt-dlp download $id from .part files")
+                } else {
+                    // Direct download: the engine loop was only held, so
+                    // removing the id from pausedIds unblocks it.
+                    _downloads.update { current ->
+                        current[id]?.let { entry ->
+                            val s = entry.state
+                            val resuming = if (s is ServiceState.Paused)
+                                ServiceState.Downloading(s.percent, 0, s.bytesDownloaded, s.totalBytes)
+                            else entry.state
+                            current + (id to entry.copy(state = resuming))
+                        } ?: current
+                    }
+                    Log.d(TAG, "Resumed download $id")
                 }
-                Log.d(TAG, "Resumed download $id")
             }
             return START_NOT_STICKY
         }
@@ -120,8 +157,12 @@ class DownloadService : Service() {
             if (id != null) {
                 cancelledIds.add(id)
                 pausedIds.remove(id)  // remove from paused too
-                // Kill yt-dlp process for this download if running
-                downloadJobs[id]?.cancel()
+                pausedRequests.remove(id)
+                downloadJobs.remove(id)
+                // Kill the yt-dlp process for this download if running.
+                // The job itself is NOT cancelled: processDownload must run
+                // to its tail to clean up state and the notification.
+                YtDlpJobs.cancel(id)
                 _downloads.update { current ->
                     current + (id to (current[id]?.copy(state = ServiceState.Cancelled)
                         ?: DownloadEntry(id, "", ServiceState.Cancelled)))
@@ -129,7 +170,11 @@ class DownloadService : Service() {
             } else {
                 // Cancel all
                 cancelledIds.addAll(pendingRequests.keys)
-                downloadJobs.values.forEach { it.cancel() }
+                // Pending (not yet started) requests must not start later.
+                pendingRequests.clear()
+                pendingRequests.keys.forEach { YtDlpJobs.cancel(it) }
+                pausedRequests.keys.forEach { YtDlpJobs.cancel(it) }
+                pausedRequests.clear()
                 _downloads.update { current ->
                     current.mapValues { (_, entry) -> entry.copy(state = ServiceState.Cancelled) }
                 }
@@ -162,18 +207,24 @@ class DownloadService : Service() {
         return START_NOT_STICKY
     }
 
-    private suspend fun processDownload(downloadId: String, notifId: Int, request: DownloadRequest) {
+    private suspend fun processDownload(
+        downloadId: String,
+        notifId: Int,
+        request: DownloadRequest,
+        existingDbId: Long? = null,
+    ) {
         val repository = (applicationContext as VidFlowApplication).repository
 
         _downloads.update { current ->
             current + (downloadId to DownloadEntry(downloadId, request.info.title, ServiceState.Downloading(0, 0)))
         }
 
-        val (_, result) = repository.startDownload(
+        val (dbId, result) = repository.startDownload(
             info = request.info,
             format = request.format,
             downloadUrl = request.downloadUrl,
             downloadId = downloadId,
+            existingRecordId = existingDbId,
         ) { progress: DownloadProgress ->
             if (cancelledIds.contains(downloadId)) return@startDownload
             // While paused: block the callback (OkHttp stream is halted in DownloadEngine)
@@ -182,7 +233,10 @@ class DownloadService : Service() {
 
             val pct = progress.percent.coerceIn(0, 99)
             val speedKBps = progress.speedBps / 1024
-            val state = ServiceState.Downloading(pct, speedKBps, progress.bytesDownloaded, progress.totalBytes)
+            val state = ServiceState.Downloading(
+                pct, speedKBps, progress.bytesDownloaded, progress.totalBytes,
+                isMerging = progress.isMerging,
+            )
             _downloads.update { current ->
                 current + (downloadId to DownloadEntry(downloadId, request.info.title, state))
             }
@@ -193,6 +247,27 @@ class DownloadService : Service() {
                     progress.bytesDownloaded, progress.totalBytes,
                 ),
             )
+        }
+
+        if (result is DownloadResult.Paused) {
+            // Keep the entry + .part files; resume relaunches this request.
+            pausedRequests[downloadId] = PausedJob(request, dbId, notifId)
+            notifMgr.cancel(notifId)
+            val pausedEntry = _downloads.value[downloadId]
+            val pausedState = (pausedEntry?.state as? ServiceState.Downloading)?.let {
+                ServiceState.Paused(it.percent, it.bytesDownloaded, it.totalBytes)
+            } ?: ServiceState.Paused(0)
+            _downloads.update { current ->
+                current + (downloadId to DownloadEntry(downloadId, request.info.title, pausedState))
+            }
+            downloadNotifIds.remove(downloadId)
+            stopMutex.withLock {
+                if (activeCount.decrementAndGet() == 0 && pendingRequests.isEmpty()) {
+                    stopForeground(STOP_FOREGROUND_REMOVE)
+                    stopSelf()
+                }
+            }
+            return
         }
 
         // Show 100% briefly before switching to result state
@@ -232,6 +307,16 @@ class DownloadService : Service() {
             is DownloadResult.Cancelled -> {
                 notifMgr.cancel(notifId)
                 ServiceState.Cancelled
+            }
+            is DownloadResult.Paused -> {
+                notifMgr.cancel(notifId)
+                ServiceState.Paused(
+                    (last as? ServiceState.Downloading)?.percent
+                        ?: (last as? ServiceState.Paused)?.percent
+                        ?: 0,
+                    lastBytes,
+                    lastTotal,
+                )
             }
         }
 
@@ -282,7 +367,9 @@ class DownloadService : Service() {
         )
 
         private val pendingRequests  = ConcurrentHashMap<String, DownloadRequest>()
-        private val cancelledIds     = ConcurrentHashMap.newKeySet<String>()
+        internal val cancelledIds    = ConcurrentHashMap.newKeySet<String>()
+        /** Paused yt-dlp jobs waiting for resume (request + history row + notif). */
+        private val pausedRequests   = ConcurrentHashMap<String, PausedJob>()
         internal val pausedIds       = ConcurrentHashMap.newKeySet<String>()
         private val downloadNotifIds = ConcurrentHashMap<String, Int>()
         private val downloadJobs     = ConcurrentHashMap<String, Job>()

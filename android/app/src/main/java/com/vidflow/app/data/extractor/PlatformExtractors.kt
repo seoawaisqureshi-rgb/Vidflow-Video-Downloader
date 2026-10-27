@@ -74,61 +74,16 @@ internal class RedditExtractor(private val client: OkHttpClient) {
 }
 
 /**
- * Twitter/X extractor via FxTwitter API.
- * Handles: regular tweets, age-restricted/18+/sensitive content, animated GIFs.
- * Does NOT work for: private accounts (requires login).
+ * Twitter/X extractor via Twitter's own syndication endpoint.
+ * First-party only: no third-party mirror APIs. yt-dlp is the fallback
+ * (ordered chain in VideoExtractor). Private accounts need login.
  */
 internal class TwitterExtractor(private val client: OkHttpClient) {
     fun extract(url: String): VideoExtractor.Result {
         val tweetId = url.regexFind("""status/(\d+)""")
             ?: return VideoExtractor.Result.Error("Could not parse tweet ID from URL.")
-        return tryFxTwitter(url, tweetId)
-            ?: tryVxTwitter(url, tweetId)
-            ?: trySyndication(url, tweetId)
+        return trySyndication(url, tweetId)
             ?: VideoExtractor.Result.Error("No video found in this tweet. Private and some 18+ posts need a public link.")
-    }
-
-    private fun tryFxTwitter(url: String, tweetId: String): VideoExtractor.Result? {
-        return try {
-            val json = client.getJson(
-                "https://api.fxtwitter.com/status/$tweetId",
-                mapOf("User-Agent" to "VidFlow/1.0")
-            ) ?: return null
-            if (json.optInt("code", -1) !in listOf(200, 0)) return null
-            val tweet  = json.optJSONObject("tweet") ?: return null
-            val media  = tweet.optJSONObject("media")  ?: return null
-            val videos = media.optJSONArray("videos")  ?: return null
-            if (videos.length() == 0) return null
-
-            val formats = mutableListOf<VideoFormat>()
-            for (i in 0 until videos.length()) {
-                val v    = videos.getJSONObject(i)
-                val vUrl = v.optString("url").takeIf { it.isNotEmpty() } ?: continue
-                val h    = v.optInt("height", 0)
-                val quality = when {
-                    h >= 1080 -> "1080p"
-                    h >= 720  -> "720p"
-                    h >= 480  -> "480p"
-                    h > 0     -> "${h}p"
-                    else      -> "Best"
-                }
-                formats.add(VideoFormat(
-                    formatId = "${v.optInt("width")}x$h", quality = quality, ext = "mp4",
-                    filesize = null, fps = null, vcodec = "h264", acodec = "aac",
-                    hasVideo = true, hasAudio = true, downloadUrl = vUrl,
-                ))
-            }
-            if (formats.isEmpty()) return null
-
-            val author = tweet.optJSONObject("author")?.optString("screen_name") ?: "twitter"
-            VideoExtractor.Result.Success(VideoInfo(
-                url = url,
-                title = tweet.optString("text", "Twitter/X Video").take(80),
-                thumbnail = null, duration = null, uploader = "@$author",
-                platform = Platform.TWITTER,
-                formats = formats.sortedByDescending { it.quality.removeSuffix("p").toIntOrNull() ?: 0 },
-            ))
-        } catch (e: Exception) { null }
     }
 
     private fun trySyndication(url: String, tweetId: String): VideoExtractor.Result? {
@@ -177,31 +132,6 @@ internal class TwitterExtractor(private val client: OkHttpClient) {
         } catch (_: Exception) { null }
     }
 
-    private fun tryVxTwitter(url: String, tweetId: String): VideoExtractor.Result? {
-        return try {
-            val json = client.getJson("https://api.vxtwitter.com/status/$tweetId") ?: return null
-            val mediaArr = json.optJSONArray("media_extended") ?: return null
-            val formats = mutableListOf<VideoFormat>()
-            for (i in 0 until mediaArr.length()) {
-                val m = mediaArr.getJSONObject(i)
-                if (m.optString("type") !in listOf("video", "gif")) continue
-                val vUrl = m.optString("url").takeIf { it.isNotEmpty() } ?: continue
-                formats.add(VideoFormat(
-                    formatId = i.toString(), quality = "Best", ext = "mp4",
-                    filesize = null, fps = null, vcodec = "h264", acodec = "aac",
-                    hasVideo = true, hasAudio = true, downloadUrl = vUrl,
-                ))
-            }
-            if (formats.isEmpty()) return null
-            VideoExtractor.Result.Success(VideoInfo(
-                url = url,
-                title = json.optString("text", "Twitter/X Video").take(80),
-                thumbnail = null, duration = null,
-                uploader = "@${json.optString("user_screen_name", "twitter")}",
-                platform = Platform.TWITTER, formats = formats,
-            ))
-        } catch (e: Exception) { null }
-    }
 }
 
 /** Vimeo extractor using public player config. */
@@ -299,86 +229,34 @@ internal class DailymotionExtractor(private val client: OkHttpClient) {
 
 /**
  * TikTok extractor.
- * Primary: TikWM API (free, no watermark).
- * Fallback: SSSTik API.
+ * First-party page scrape only (the page's own video URLs), then the
+ * ordered chain falls back to on-device yt-dlp. No third-party
+ * downloader-site APIs: they are remote servers VidFlow does not need,
+ * and yt-dlp covers the same public videos on-device.
  * Supports vt.tiktok.com, vm.tiktok.com, and full tiktok.com URLs.
  */
 internal class TikTokExtractor(private val client: OkHttpClient) {
     fun extract(url: String): VideoExtractor.Result {
-        return tryTikWM(url) ?: trySSSTik(url)
+        return tryTikTokPage(url)
             ?: VideoExtractor.Result.Error("Could not extract TikTok video. Please ensure the video is public and try again.")
     }
 
-    private fun tryTikWM(url: String): VideoExtractor.Result? {
+    private fun tryTikTokPage(url: String): VideoExtractor.Result? {
         return try {
-            val apiUrl = "https://www.tikwm.com/api/?url=${java.net.URLEncoder.encode(url, "UTF-8")}&hd=1"
-            val json = client.getJson(apiUrl, mapOf(
-                "Referer" to "https://www.tikwm.com/",
-                "Origin" to "https://www.tikwm.com",
+            val html = client.getText(url, mapOf(
+                "User-Agent" to "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+                "Accept" to "text/html,application/xhtml+xml",
+                "Referer" to "https://www.tiktok.com/",
             )) ?: return null
-
-            if (json.optInt("code") != 0) return null
-            val data = json.getJSONObject("data")
-            val title = data.optString("title", "TikTok Video").ifEmpty { "TikTok Video" }
-            val cover = data.optString("cover").takeIf { it.isNotEmpty() }
-            val duration = data.optLong("duration").takeIf { it > 0 }
-            val author = data.optJSONObject("author")?.optString("nickname") ?: "TikTok Creator"
-
-            // Try HD play URL first, then standard
-            val playUrl = data.optString("hdplay").ifEmpty { data.optString("play") }
-            val wmplayUrl = data.optString("wmplay")
-            val musicUrl = data.optString("music")
-            val size = data.optLong("hd_size").takeIf { it > 0 } ?: data.optLong("size").takeIf { it > 0 }
-
-            val formats = mutableListOf<VideoFormat>()
-            if (playUrl.isNotEmpty()) {
-                formats.add(VideoFormat(
-                    formatId = "hd_no_watermark", quality = "HD (No Watermark)", ext = "mp4",
-                    filesize = size, fps = 30, vcodec = "h264", acodec = "aac",
-                    hasVideo = true, hasAudio = true, downloadUrl = playUrl,
-                ))
-            }
-            if (wmplayUrl.isNotEmpty() && wmplayUrl != playUrl) {
-                formats.add(VideoFormat(
-                    formatId = "watermarked", quality = "Standard (With Watermark)", ext = "mp4",
-                    filesize = data.optLong("wm_size").takeIf { it > 0 },
-                    fps = 30, vcodec = "h264", acodec = "aac",
-                    hasVideo = true, hasAudio = true, downloadUrl = wmplayUrl,
-                ))
-            }
-            if (musicUrl.isNotEmpty()) {
-                formats.add(VideoFormat(
-                    formatId = "audio_only", quality = "Audio Only (MP3)", ext = "mp3",
-                    filesize = null, fps = null, vcodec = null, acodec = "mp3",
-                    hasVideo = false, hasAudio = true, downloadUrl = musicUrl,
-                ))
-            }
-
-            if (formats.isEmpty()) return null
-
-            VideoExtractor.Result.Success(VideoInfo(
-                url = url, title = title, thumbnail = cover, duration = duration, uploader = author,
-                platform = Platform.TIKTOK, formats = formats,
-            ))
-        } catch (e: Exception) { null }
-    }
-
-    private fun trySSSTik(url: String): VideoExtractor.Result? {
-        return try {
-            // SSSTik fallback API
-            val encoded = java.net.URLEncoder.encode(url, "UTF-8")
-            val apiUrl = "https://ssstik.io/abc?url=$encoded"
-            val html = client.getText(apiUrl, mapOf(
-                "Referer" to "https://ssstik.io/",
-                "User-Agent" to "Mozilla/5.0 (Android 14; Mobile) AppleWebKit/537.36",
-            )) ?: return null
-
-            val videoUrl = html.regexFind("""href="(https://[^"]+\.mp4[^"]*)" download""")
-                ?: html.regexFind("""src="(https://[^"]+\.mp4[^"]*)"""")
+            val videoUrl = html.regexFind("playAddr[^a-zA-Z0-9]+(https:[^\"\\\\]+)")?.unescape()
+                ?: html.regexFind("<video[^>]+src=\"([^\"]+)\"")
+                ?: html.regexFind("<meta property=\"og:video\" content=\"([^\"]+)\"")
                 ?: return null
-
+            val title = html.regexFind("<meta property=\"og:title\" content=\"([^\"]+)\"")
+                ?: html.regexFind("<title>([^<]+)</title>")
+                ?: "TikTok Video"
             VideoExtractor.Result.Success(VideoInfo(
-                url = url, title = "TikTok Video", thumbnail = null, duration = null,
+                url = url, title = title.take(80), thumbnail = null, duration = null,
                 uploader = "TikTok Creator", platform = Platform.TIKTOK,
                 formats = listOf(VideoFormat(
                     formatId = "best", quality = "Best Available", ext = "mp4",
@@ -392,7 +270,9 @@ internal class TikTokExtractor(private val client: OkHttpClient) {
 
 /**
  * Instagram extractor.
- * Public reels/posts via proxy APIs, ddinstagram, then embed.
+ * First-party only: the public oEmbed + embed page. The ordered chain
+ * then tries the Instagram app API and on-device yt-dlp (with the WebView
+ * session when logged in). No third-party downloader-site APIs.
  */
 internal class InstagramExtractor(private val client: OkHttpClient) {
     fun extract(url: String): VideoExtractor.Result {
@@ -400,10 +280,6 @@ internal class InstagramExtractor(private val client: OkHttpClient) {
         val shortcode = cleanUrl.regexFind("""/(?:p|reel|reels|tv|share/reel|share/p)/([A-Za-z0-9_-]+)""", 1)
             ?: return VideoExtractor.Result.Error("Invalid Instagram URL. Use a direct link to a post, reel, or video.")
 
-        trySaveIg(url, shortcode)?.let { return it }
-        trySnapInsta(url, shortcode)?.let { return it }
-        tryIgram(url, shortcode)?.let { return it }
-        tryDdInstagram(url, shortcode)?.let { return it }
         tryEmbed(url, cleanUrl, shortcode)?.let { return it }
 
         return VideoExtractor.Result.Error(
@@ -415,7 +291,7 @@ internal class InstagramExtractor(private val client: OkHttpClient) {
     private fun success(url: String, title: String, thumb: String?, videoUrl: String) =
         VideoExtractor.Result.Success(VideoInfo(
             url = url,
-            title = title.replace(" • Instagram", "").trim().ifEmpty { "Instagram Video" },
+            title = title.replace(" â€¢ Instagram", "").trim().ifEmpty { "Instagram Video" },
             thumbnail = thumb, duration = null, uploader = "Instagram",
             platform = Platform.INSTAGRAM,
             formats = listOf(VideoFormat(
@@ -435,73 +311,6 @@ internal class InstagramExtractor(private val client: OkHttpClient) {
         )
         return patterns.firstNotNullOfOrNull { text.regexFind(it)?.unescape()?.replace("\\/", "/") }
             ?.takeIf { it.startsWith("http") }
-    }
-
-    private fun trySaveIg(url: String, shortcode: String): VideoExtractor.Result? {
-        val encoded = java.net.URLEncoder.encode(url, "UTF-8")
-        val body = client.postForm(
-            "https://v3.saveig.app/api/ajaxSearch",
-            mapOf("q" to url, "t" to "media", "lang" to "en"),
-            mapOf(
-                "Content-Type" to "application/x-www-form-urlencoded",
-                "X-Requested-With" to "XMLHttpRequest",
-                "Origin" to "https://saveig.app",
-                "Referer" to "https://saveig.app/",
-            ),
-        ) ?: client.postForm(
-            "https://saveig.app/api/ajaxSearch",
-            mapOf("q" to encoded, "t" to "media", "lang" to "en"),
-            mapOf(
-                "X-Requested-With" to "XMLHttpRequest",
-                "Referer" to "https://saveig.app/",
-            ),
-        ) ?: return null
-        val html = runCatching { JSONObject(body).optString("data") }.getOrNull()?.ifEmpty { body } ?: body
-        val videoUrl = firstMp4(html) ?: return null
-        return success(url, "Instagram Video", null, videoUrl)
-    }
-
-    private fun trySnapInsta(url: String, shortcode: String): VideoExtractor.Result? {
-        val encoded = java.net.URLEncoder.encode(url, "UTF-8")
-        val body = client.postForm(
-            "https://snapinsta.app/api/ajaxSearch",
-            mapOf("q" to encoded, "t" to "media", "lang" to "en"),
-            mapOf(
-                "Content-Type" to "application/x-www-form-urlencoded",
-                "X-Requested-With" to "XMLHttpRequest",
-                "Referer" to "https://snapinsta.app/",
-            ),
-        ) ?: return null
-        val html = runCatching { JSONObject(body).optString("data") }.getOrNull()?.ifEmpty { body } ?: body
-        val videoUrl = firstMp4(html) ?: return null
-        return success(url, "Instagram Video", null, videoUrl)
-    }
-
-    private fun tryIgram(url: String, shortcode: String): VideoExtractor.Result? {
-        val body = client.postForm(
-            "https://igram.world/api/ajaxSearch",
-            mapOf("q" to url, "t" to "media", "lang" to "en"),
-            mapOf(
-                "X-Requested-With" to "XMLHttpRequest",
-                "Referer" to "https://igram.world/",
-                "Origin" to "https://igram.world",
-            ),
-        ) ?: return null
-        val html = runCatching { JSONObject(body).optString("data") }.getOrNull()?.ifEmpty { body } ?: body
-        val videoUrl = firstMp4(html) ?: return null
-        return success(url, "Instagram Video", null, videoUrl)
-    }
-
-    private fun tryDdInstagram(url: String, shortcode: String): VideoExtractor.Result? {
-        val dd = "https://www.ddinstagram.com/reel/$shortcode/"
-        val html = client.getText(dd, mapOf(
-            "User-Agent" to "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15",
-            "Accept" to "text/html",
-        )) ?: return null
-        val videoUrl = firstMp4(html) ?: return null
-        val title = html.regexFind("""<meta property="og:title" content="([^"]+)"""") ?: "Instagram Video"
-        val thumb = html.regexFind("""<meta property="og:image" content="([^"]+)"""")
-        return success(url, title, thumb, videoUrl)
     }
 
     private fun tryEmbed(url: String, cleanUrl: String, shortcode: String): VideoExtractor.Result? {
@@ -561,16 +370,11 @@ internal class FacebookExtractor(private val client: OkHttpClient) {
                 }
             }
 
-            // Method 3: Third-party proxy API (SnapSave / SnapInsta backend)
-            if (hdUrl == null && sdUrl == null) {
-                trySnapSaveFb(url)?.let { return it }
-            }
-
             if (hdUrl == null && sdUrl == null) {
                 return VideoExtractor.Result.Error(
                     "Could not find Facebook video stream.\n\n" +
-                    "• Ensure the post/video is public\n" +
-                    "• Private group posts require login"
+                    "â€¢ Ensure the post/video is public\n" +
+                    "â€¢ Private group posts require login"
                 )
             }
 
@@ -638,39 +442,6 @@ internal class FacebookExtractor(private val client: OkHttpClient) {
         }
     }
 
-    private fun trySnapSaveFb(url: String): VideoExtractor.Result? {
-        val body = client.postForm(
-            "https://snapinsta.app/api/ajaxSearch",
-            mapOf("q" to url, "t" to "media", "lang" to "en"),
-            mapOf(
-                "X-Requested-With" to "XMLHttpRequest",
-                "Referer" to "https://snapinsta.app/",
-            ),
-        ) ?: client.postForm(
-            "https://saveig.app/api/ajaxSearch",
-            mapOf("q" to url, "t" to "media", "lang" to "en"),
-            mapOf(
-                "X-Requested-With" to "XMLHttpRequest",
-                "Referer" to "https://saveig.app/",
-            ),
-        ) ?: return null
-
-        val data = runCatching { JSONObject(body).optString("data") }.getOrNull()?.ifEmpty { body } ?: body
-        val videoUrl = data.regexFind("""<a[^>]+href="(https://[^"]+\.mp4[^"]*)"""")
-            ?: data.regexFind("""href="(https://video[^"]+fbcdn\.net/[^"]+)"""")?.unescape()
-            ?: data.regexFind(""""(https://video[^"]+fbcdn\.net/[^"]+)"""")?.unescape()
-            ?: return null
-
-        return VideoExtractor.Result.Success(VideoInfo(
-            url = url, title = "Facebook Video", thumbnail = null, duration = null, uploader = "Facebook",
-            platform = Platform.FACEBOOK,
-            formats = listOf(VideoFormat(
-                formatId = "best", quality = "Best Available", ext = "mp4",
-                filesize = null, fps = 30, vcodec = "h264", acodec = "aac",
-                hasVideo = true, hasAudio = true, downloadUrl = videoUrl,
-            )),
-        ))
-    }
 }
 class PinterestExtractor(private val client: OkHttpClient) {
     fun extract(url: String): VideoExtractor.Result {
@@ -686,7 +457,7 @@ class PinterestExtractor(private val client: OkHttpClient) {
                 "Accept" to "text/html,application/xhtml+xml,*/*;q=0.8",
             )) ?: return VideoExtractor.Result.Error("Could not load Pinterest page.")
 
-            // Try multiple patterns — Pinterest changes data format regularly
+            // Try multiple patterns â€” Pinterest changes data format regularly
             val videoUrl =
                 html.regexFind(""""V_1080p":\{"url":"([^"]+)"""")?.unescape()
                 ?: html.regexFind(""""V_720p":\{"url":"([^"]+)"""")?.unescape()
@@ -728,9 +499,6 @@ class PinterestExtractor(private val client: OkHttpClient) {
 internal class ThreadsExtractor(private val client: OkHttpClient) {
     fun extract(url: String): VideoExtractor.Result {
         return try {
-            tryThreadsProxy(url)?.let { return it }
-            trySaveIgThreads(url)?.let { return it }
-
             val embedUrl = "${url.trimEnd('/')}/embed"
             val html = client.getText(embedUrl, mapOf(
                 "User-Agent" to "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 Mobile/15E148 Safari/604.1",
@@ -766,54 +534,6 @@ internal class ThreadsExtractor(private val client: OkHttpClient) {
         }
     }
 
-    private fun tryThreadsProxy(url: String): VideoExtractor.Result? {
-        val body = client.postForm(
-            "https://snapinsta.app/api/ajaxSearch",
-            mapOf("q" to url, "t" to "media", "lang" to "en"),
-            mapOf(
-                "X-Requested-With" to "XMLHttpRequest",
-                "Referer" to "https://snapinsta.app/",
-            ),
-        ) ?: return null
-        val html = runCatching { JSONObject(body).optString("data") }.getOrNull()?.ifEmpty { body } ?: body
-        val videoUrl = html.regexFind("""<a[^>]+href="(https://[^"]+\.mp4[^"]*)"""")
-            ?: html.regexFind(""""(https://[^"]+\.mp4[^"]*)"""")
-            ?: return null
-        return VideoExtractor.Result.Success(VideoInfo(
-            url = url, title = "Threads Video", thumbnail = null, duration = null, uploader = null,
-            platform = Platform.THREADS,
-            formats = listOf(VideoFormat(
-                formatId = "best", quality = "Best", ext = "mp4",
-                filesize = null, fps = 30, vcodec = "h264", acodec = "aac",
-                hasVideo = true, hasAudio = true, downloadUrl = videoUrl.unescape(),
-            )),
-        ))
-    }
-
-    private fun trySaveIgThreads(url: String): VideoExtractor.Result? {
-        val encoded = java.net.URLEncoder.encode(url, "UTF-8")
-        val body = client.postForm(
-            "https://saveig.app/api/ajaxSearch",
-            mapOf("q" to encoded, "t" to "media", "lang" to "en"),
-            mapOf(
-                "X-Requested-With" to "XMLHttpRequest",
-                "Referer" to "https://saveig.app/",
-            ),
-        ) ?: return null
-        val html = runCatching { JSONObject(body).optString("data") }.getOrNull()?.ifEmpty { body } ?: body
-        val videoUrl = html.regexFind("""<a[^>]+href="(https://[^"]+\.mp4[^"]*)"""")
-            ?: html.regexFind(""""(https://[^"]+\.mp4[^"]*)"""")
-            ?: return null
-        return VideoExtractor.Result.Success(VideoInfo(
-            url = url, title = "Threads Video", thumbnail = null, duration = null, uploader = null,
-            platform = Platform.THREADS,
-            formats = listOf(VideoFormat(
-                formatId = "best", quality = "Best", ext = "mp4",
-                filesize = null, fps = 30, vcodec = "h264", acodec = "aac",
-                hasVideo = true, hasAudio = true, downloadUrl = videoUrl.unescape(),
-            )),
-        ))
-    }
 }
 
 /** Direct / generic video URL extractor for raw MP4, WEBM, MOV streams. */

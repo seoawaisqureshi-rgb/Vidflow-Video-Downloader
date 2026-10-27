@@ -4,6 +4,7 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.slideInVertically
 import androidx.compose.foundation.background
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -68,18 +69,20 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import coil.compose.AsyncImage
+import com.vidflow.app.R
 import com.vidflow.app.data.model.VideoFormat
 import com.vidflow.app.data.model.VideoInfo
 import com.vidflow.app.service.DownloadEntry
 import com.vidflow.app.service.ServiceState
 import com.vidflow.app.theme.Background
-import com.vidflow.app.theme.Cyan
-import com.vidflow.app.theme.CyanGlow
+import com.vidflow.app.theme.AccentDeep
+import com.vidflow.app.theme.AccentGlow
 import com.vidflow.app.theme.Error
 import com.vidflow.app.theme.ErrorDim
 import com.vidflow.app.theme.Outline
@@ -89,9 +92,9 @@ import com.vidflow.app.theme.SurfaceVariant
 import com.vidflow.app.theme.TextMuted
 import com.vidflow.app.theme.TextPrimary
 import com.vidflow.app.theme.TextSecondary
-import com.vidflow.app.theme.Violet
-import com.vidflow.app.theme.VioletGlow
+import com.vidflow.app.theme.Accent
 import com.vidflow.app.ui.components.DownloadProgressBar
+import com.vidflow.app.ui.components.FormatLabels
 import com.vidflow.app.ui.components.GlassCard
 import com.vidflow.app.ui.components.GradientButton
 import com.vidflow.app.ui.components.PlatformBadge
@@ -102,6 +105,7 @@ import com.vidflow.app.ui.components.ShimmerBox
 fun HomeScreen(
     viewModel: HomeViewModel,
     modifier: Modifier = Modifier,
+    onOpenLogin: () -> Unit = {},
 ) {
     val state by viewModel.uiState.collectAsState()
     val activeDownloads by viewModel.activeDownloads.collectAsState()
@@ -200,6 +204,16 @@ fun HomeScreen(
                 }
             }
 
+            state.loginRequiredPlatform?.let { platform ->
+                item {
+                    LoginRequiredBanner(
+                        platformName = platform.displayName,
+                        onLogin = onOpenLogin,
+                        onDismiss = viewModel::clearLoginRequired,
+                    )
+                }
+            }
+
             if (state.isLoading) {
                 item { VideoInfoShimmer() }
             }
@@ -244,7 +258,7 @@ private fun AmbientGlow() {
                 .size(280.dp)
                 .offset(x = 180.dp, y = (-60).dp)
                 .clip(CircleShape)
-                .background(VioletGlow)
+                .background(AccentGlow)
                 .blur(100.dp),
         )
         Box(
@@ -253,7 +267,7 @@ private fun AmbientGlow() {
                 .align(Alignment.BottomStart)
                 .offset(x = (-60).dp, y = 60.dp)
                 .clip(CircleShape)
-                .background(CyanGlow)
+                .background(AccentGlow)
                 .blur(80.dp),
         )
     }
@@ -286,20 +300,15 @@ private fun AppHeader(activeCount: Int) {
                 modifier = Modifier
                     .size(48.dp)
                     .clip(RoundedCornerShape(14.dp))
-                    .background(
-                        Brush.linearGradient(
-                            listOf(Violet, Cyan),
-                            start = Offset(0f, 0f),
-                            end = Offset(100f, 100f),
-                        )
-                    ),
+                    .background(Background)
+                    .border(1.dp, AccentGlow, RoundedCornerShape(14.dp)),
                 contentAlignment = Alignment.Center,
             ) {
-                Icon(
-                    Icons.Rounded.Download,
-                    contentDescription = null,
-                    tint = Color.White,
-                    modifier = Modifier.size(26.dp),
+                // Same artwork as the launcher icon (black tile + green arrow)
+                Image(
+                    painter = painterResource(id = R.drawable.ic_launcher_foreground),
+                    contentDescription = "VidFlow",
+                    modifier = Modifier.size(40.dp),
                 )
             }
             if (activeCount > 0) {
@@ -309,7 +318,7 @@ private fun AppHeader(activeCount: Int) {
                         .offset(x = 4.dp, y = (-4).dp)
                         .size(18.dp)
                         .clip(CircleShape)
-                        .background(Cyan),
+                        .background(AccentDeep),
                     contentAlignment = Alignment.Center,
                 ) {
                     Text(
@@ -353,7 +362,7 @@ private fun UrlInputCard(
                 )
             },
             leadingIcon = {
-                Icon(Icons.Rounded.Link, contentDescription = null, tint = Violet)
+                Icon(Icons.Rounded.Link, contentDescription = null, tint = Accent)
             },
             trailingIcon = {
                 if (url.isNotBlank()) {
@@ -362,7 +371,7 @@ private fun UrlInputCard(
                     }
                 } else {
                     IconButton(onClick = onPaste) {
-                        Icon(Icons.Rounded.ContentPaste, contentDescription = "Paste", tint = Cyan)
+                        Icon(Icons.Rounded.ContentPaste, contentDescription = "Paste", tint = AccentDeep)
                     }
                 }
             },
@@ -374,9 +383,9 @@ private fun UrlInputCard(
             singleLine = true,
             shape = RoundedCornerShape(12.dp),
             colors = OutlinedTextFieldDefaults.colors(
-                focusedBorderColor = Violet,
+                focusedBorderColor = Accent,
                 unfocusedBorderColor = Outline,
-                cursorColor = Violet,
+                cursorColor = Accent,
                 focusedTextColor = TextPrimary,
                 unfocusedTextColor = TextPrimary,
                 focusedContainerColor = Surface.copy(alpha = 0.5f),
@@ -402,7 +411,7 @@ private fun UrlInputCard(
                 modifier = Modifier
                     .fillMaxWidth()
                     .clip(RoundedCornerShape(4.dp)),
-                color = Violet,
+                color = Accent,
                 trackColor = SurfaceVariant,
             )
         }
@@ -459,6 +468,49 @@ private fun ErrorBanner(message: String, onDismiss: () -> Unit) {
         )
         IconButton(onClick = onDismiss, modifier = Modifier.size(24.dp)) {
             Icon(Icons.Rounded.Close, contentDescription = "Dismiss", tint = Error)
+        }
+    }
+}
+
+@Composable
+private fun LoginRequiredBanner(
+    platformName: String,
+    onLogin: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .background(AccentGlow)
+            .border(1.dp, Accent.copy(alpha = 0.4f), RoundedCornerShape(12.dp))
+            .padding(12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(Icons.Rounded.Person, contentDescription = null, tint = Accent, modifier = Modifier.size(20.dp))
+        Spacer(Modifier.width(8.dp))
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                "Login needed for $platformName",
+                style = MaterialTheme.typography.labelLarge,
+                color = TextPrimary,
+                fontWeight = FontWeight.SemiBold,
+            )
+            Text(
+                "Sign in once in the Login tab, then try this link again.",
+                style = MaterialTheme.typography.labelSmall,
+                color = TextSecondary,
+            )
+        }
+        Spacer(Modifier.width(8.dp))
+        androidx.compose.material3.Button(
+            onClick = onLogin,
+            shape = RoundedCornerShape(10.dp),
+        ) {
+            Text("Login")
+        }
+        IconButton(onClick = onDismiss, modifier = Modifier.size(24.dp)) {
+            Icon(Icons.Rounded.Close, contentDescription = "Dismiss", tint = TextSecondary)
         }
     }
 }
@@ -565,7 +617,7 @@ private fun FormatSelectionCard(
                         .fillMaxWidth()
                         .clip(RoundedCornerShape(10.dp))
                         .then(
-                            if (isSelected) Modifier.background(VioletGlow).border(1.dp, Violet, RoundedCornerShape(10.dp))
+                            if (isSelected) Modifier.background(AccentGlow).border(1.dp, Accent, RoundedCornerShape(10.dp))
                             else Modifier.background(SurfaceVariant)
                         )
                         .clickable { onSelect(format) }
@@ -577,7 +629,7 @@ private fun FormatSelectionCard(
                         Text(
                             format.quality,
                             style = MaterialTheme.typography.labelLarge,
-                            color = if (isSelected) Violet else TextPrimary,
+                            color = if (isSelected) Accent else TextPrimary,
                             fontWeight = if (isSelected) FontWeight.Bold else FontWeight.Normal,
                         )
                         Text(
@@ -590,15 +642,13 @@ private fun FormatSelectionCard(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(6.dp),
                     ) {
-                        format.filesize?.let { bytes ->
-                            Text(
-                                formatBytes(bytes),
-                                style = MaterialTheme.typography.labelSmall,
-                                color = Cyan,
-                            )
-                        }
+                        Text(
+                            FormatLabels.sizeLabel(format),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = if (format.filesize != null) AccentDeep else TextMuted,
+                        )
                         if (isSelected) {
-                            Icon(Icons.Rounded.CheckCircle, contentDescription = null, tint = Violet, modifier = Modifier.size(18.dp))
+                            Icon(Icons.Rounded.CheckCircle, contentDescription = null, tint = Accent, modifier = Modifier.size(18.dp))
                         }
                     }
                 }
@@ -631,7 +681,7 @@ private fun DownloadActionCard(
         Text(
             "New link",
             style = MaterialTheme.typography.labelLarge,
-            color = Cyan,
+            color = AccentDeep,
             fontWeight = FontWeight.SemiBold,
             modifier = Modifier
                 .clip(RoundedCornerShape(8.dp))
@@ -651,12 +701,12 @@ private fun ClipboardBanner(
         modifier = Modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(12.dp))
-            .background(VioletGlow)
-            .border(1.dp, Violet.copy(alpha = 0.45f), RoundedCornerShape(12.dp))
+            .background(AccentGlow)
+            .border(1.dp, Accent.copy(alpha = 0.45f), RoundedCornerShape(12.dp))
             .padding(12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Icon(Icons.Rounded.ContentPaste, contentDescription = null, tint = Cyan, modifier = Modifier.size(20.dp))
+        Icon(Icons.Rounded.ContentPaste, contentDescription = null, tint = AccentDeep, modifier = Modifier.size(20.dp))
         Spacer(Modifier.width(8.dp))
         Column(modifier = Modifier.weight(1f)) {
             Text("Link found in clipboard", style = MaterialTheme.typography.labelLarge, color = TextPrimary)
@@ -670,7 +720,7 @@ private fun ClipboardBanner(
         }
         Text(
             "Analyze",
-            color = Cyan,
+            color = AccentDeep,
             fontWeight = FontWeight.SemiBold,
             modifier = Modifier
                 .clip(RoundedCornerShape(8.dp))
@@ -709,8 +759,8 @@ private fun ActiveDownloadCard(
                 tint = when (state) {
                     is ServiceState.Success -> Success
                     is ServiceState.Error -> Error
-                    is ServiceState.Paused -> Violet
-                    else -> Cyan
+                    is ServiceState.Paused -> Accent
+                    else -> AccentDeep
                 },
                 modifier = Modifier.size(22.dp),
             )
@@ -736,10 +786,14 @@ private fun ActiveDownloadCard(
                         ) {
                             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                 Text(
-                                    if (state.percent in 0..100) "${state.percent}%" else "Preparing...",
+                                    when {
+                                        state.isMerging -> "Merging... ${state.percent}%"
+                                        state.percent in 0..100 -> "${state.percent}%"
+                                        else -> "Preparing..."
+                                    },
                                     style = MaterialTheme.typography.labelMedium,
                                     fontWeight = FontWeight.Bold,
-                                    color = Cyan,
+                                    color = AccentDeep,
                                 )
                                 if (state.speedKBps > 0) {
                                     Text(
@@ -758,7 +812,7 @@ private fun ActiveDownloadCard(
                                 sizeText,
                                 style = MaterialTheme.typography.labelSmall,
                                 fontWeight = FontWeight.SemiBold,
-                                color = Violet,
+                                color = Accent,
                             )
                         }
                     }
@@ -774,7 +828,7 @@ private fun ActiveDownloadCard(
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             Text(
-                                "Paused • ${state.percent}%",
+                                "Paused â€¢ ${state.percent}%",
                                 style = MaterialTheme.typography.labelMedium,
                                 fontWeight = FontWeight.SemiBold,
                                 color = TextMuted,
@@ -816,7 +870,7 @@ private fun ActiveDownloadCard(
                 }
                 is ServiceState.Paused -> {
                     IconButton(onClick = onResume, modifier = Modifier.size(36.dp)) {
-                        Icon(Icons.Rounded.PlayArrow, contentDescription = "Resume", tint = Cyan)
+                        Icon(Icons.Rounded.PlayArrow, contentDescription = "Resume", tint = AccentDeep)
                     }
                     IconButton(onClick = onCancel, modifier = Modifier.size(36.dp)) {
                         Icon(Icons.Rounded.Stop, contentDescription = "Cancel", tint = Error)
@@ -824,7 +878,7 @@ private fun ActiveDownloadCard(
                 }
                 is ServiceState.Success -> {
                     IconButton(onClick = { openDownloadsFolder(ctx) }, modifier = Modifier.size(36.dp)) {
-                        Icon(Icons.Rounded.FolderOpen, contentDescription = "Open folder", tint = Cyan)
+                        Icon(Icons.Rounded.FolderOpen, contentDescription = "Open folder", tint = AccentDeep)
                     }
                     IconButton(onClick = onDismiss, modifier = Modifier.size(36.dp)) {
                         Icon(Icons.Rounded.Close, contentDescription = "Dismiss", tint = TextMuted)
@@ -847,7 +901,7 @@ private fun progressLabel(percent: Int, downloaded: Long, total: Long): String {
         else -> null
     }
     val pct = if (percent in 0..100) "$percent%" else "Preparing..."
-    return if (size != null) "$pct • $size" else pct
+    return if (size != null) "$pct â€¢ $size" else pct
 }
 
 private fun formatSpeed(speedKBps: Long): String {
@@ -873,13 +927,7 @@ private fun fmtBytes(bytes: Long): String {
 private fun formatBytes(bytes: Long): String = fmtBytes(bytes)
 
 private fun buildFormatMeta(format: VideoFormat): String {
-    val parts = mutableListOf<String>()
-    parts.add(format.ext.uppercase())
-    if (format.hasVideo && format.hasAudio) parts.add("Video+Audio")
-    else if (format.hasVideo) parts.add("Video only")
-    else if (format.hasAudio) parts.add("Audio only")
-    format.fps?.let { if (it > 0) parts.add("${it}fps") }
-    return parts.joinToString(" · ")
+    return FormatLabels.metaLine(format)
 }
 
 private fun openDownloadsFolder(context: android.content.Context) {

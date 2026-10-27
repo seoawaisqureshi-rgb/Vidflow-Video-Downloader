@@ -1,31 +1,114 @@
-<?xml version="1.0" encoding="utf-8"?>
-<!--
-  108dp canvas. Safe zone is the centered 72dp square (18–90).
-  Purple stem, cyan chevron, purple tray. Geometry fills ~90% of the safe zone.
--->
+<!-- VidFlow launcher icon FOREGROUND (icon-v2, 2026-10-26).
+     Structure copied from the user-supplied Spotify-style reference:
+     bright green circle centred on the black tile, with ONE bold black
+     DOWN ARROW (download arrow) embossed in the centre, in the same
+     raised style as the reference arcs (light upper edge, shadow below).
+     No champagne tones, no violet, no cyan, no ring badge, no tray bar, no play
+     triangle, no wifi arcs. The arrow is the only centre glyph.
+
+     Gradients use the aapt:attr form, the only gradient form Android
+     VectorDrawable accepts (coordinates in viewport units).
+
+     SAFE ZONE (measured on the 108dp canvas, centre 54,54, limit radius 33):
+       - Green circle: centre (54,54), radius 27.0  -> max radius 27.0  OK
+       - Arrow tip (54,74):                          -> radius 20.0   OK
+       - Arrow shaft top corners (49,38) / (59,38):  -> radius 16.8   OK
+       - Arrowhead corners (40,58) / (68,58):        -> radius 14.6   OK
+       - Arrow shadow copy (offset +1.2dp down):     -> radius 21.2   OK
+       - Circle gloss blob (ellipse centre (45,42), rx 14, ry 8.5):
+                                                     -> max ~26.5    OK
+     Overall max radius = 27.0 (green circle) < 33: no launcher mask
+     (circle, squircle, rounded square) can crop any part of the mark.
+
+     REVISION 2026-10-26 (shine, user-approved): gloss added ONLY —
+     tile top sheen (background XML), green-circle upper-left gloss blob
+     and a faint white top-edge line on the arrow (this file). Colours,
+     arrow geometry, circle size and layout are unchanged. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:aapt="http://schemas.android.com/aapt"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
 
-    <!-- Soft halo inside safe zone -->
-    <path
-        android:fillColor="#337C3AED"
-        android:pathData="M54,54m-28,0a28,28 0,1,1 56,0a28,28 0,1,1 -56,0" />
+    <!-- Green disc, radius 27, centred (54,54).
+         Light top-left, Spotify green centre, deeper edge. -->
+    <path android:pathData="M27,54 a27,27 0 1,0 54,0 a27,27 0 1,0 -54,0">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:type="radial"
+                android:centerX="43.2"
+                android:centerY="38.9"
+                android:gradientRadius="91.8">
+                <item android:offset="0" android:color="#3CE87F" />
+                <item android:offset="0.45" android:color="#1ED760" />
+                <item android:offset="1" android:color="#0E9A48" />
+            </gradient>
+        </aapt:attr>
+    </path>
 
-    <!-- Stem -->
-    <path
-        android:fillColor="#8B5CF6"
-        android:pathData="M47,22 L61,22 L61,50 L47,50 Z" />
+    <!-- GLOSS on the green disc (revision 2026-10-26, user-approved shine):
+         bright highlight on the upper-left of the circle, as on the
+         reference icon. Ellipse centre (45,42), rx 14, ry 8.5 — fully
+         inside the green disc (disc edge at y=42 starts at x=29.8, blob
+         starts at x=31). Max radius from canvas centre (54,54) ~26.5. -->
+    <path android:pathData="M31,42 a14,8.5 0 1,0 28,0 a14,8.5 0 1,0 -28,0">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:type="radial"
+                android:centerX="45"
+                android:centerY="42"
+                android:gradientRadius="15">
+                <item android:offset="0" android:color="#99FFFFFF" />
+                <item android:offset="0.55" android:color="#33FFFFFF" />
+                <item android:offset="1" android:color="#00FFFFFF" />
+            </gradient>
+        </aapt:attr>
+    </path>
 
-    <!-- Cyan chevron arrow head — tip stays above y=82 -->
+    <!-- Arrow soft shadow, offset 1.2dp down (emboss drop shadow). -->
     <path
-        android:fillColor="#06B6D4"
-        android:pathData="M28,48 L54,78 L80,48 L68,40 L54,58 L40,40 Z" />
+        android:pathData="M49,39.2 H59 V59.2 H68 L54,75.2 L40,59.2 H49 Z"
+        android:fillColor="#0B5E2C"
+        android:fillAlpha="0.55" />
 
-    <!-- Tray bar (y=82–88, inside 18–90) -->
+    <!-- Down arrow: shaft x 49-59 (y 38-60), head (40,58)-(68,58)-(54,74).
+         Embossed: light grey upper edge fading to pure black. -->
+    <path android:pathData="M49,38 H59 V58 H68 L54,74 L40,58 H49 Z">
+        <aapt:attr name="android:fillColor">
+            <gradient
+                android:type="linear"
+                android:startX="0"
+                android:startY="38"
+                android:endX="0"
+                android:endY="74">
+                <item android:offset="0" android:color="#3D3D3D" />
+                <item android:offset="0.35" android:color="#141414" />
+                <item android:offset="1" android:color="#000000" />
+            </gradient>
+        </aapt:attr>
+    </path>
+
+    <!-- Top-edge highlight: the raised lip catching light, as on the
+         reference arcs. Shaft top edge + the two head junction edges. -->
     <path
-        android:fillColor="#8B5CF6"
-        android:pathData="M30,82 L78,82 L78,88 L30,88 Z" />
+        android:pathData="M49,38 H59"
+        android:strokeColor="#7A7A7A"
+        android:strokeWidth="0.9"
+        android:strokeAlpha="0.7"
+        android:strokeLineCap="round" />
+    <!-- Extra gloss on the arrow's top edge (shine revision): the same
+         light that sheens the tile and circle catches the arrow's lip. -->
+    <path
+        android:pathData="M49,38 H59"
+        android:strokeColor="#FFFFFF"
+        android:strokeWidth="0.7"
+        android:strokeAlpha="0.35"
+        android:strokeLineCap="round" />
+    <path
+        android:pathData="M40,58 H49 M59,58 H68"
+        android:strokeColor="#5A5A5A"
+        android:strokeWidth="0.7"
+        android:strokeAlpha="0.5"
+        android:strokeLineCap="round" />
 </vector>

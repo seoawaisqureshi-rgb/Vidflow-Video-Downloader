@@ -78,19 +78,23 @@ class VideoExtractorTest {
     }
 
     @Test
-    fun facebookStories_returnsClearError() = runBlocking {
+    fun facebookStories_requiresLogin() = runBlocking {
+        // Stories without a WebView session ask for login instead of a hard error.
         val result = extractor.extract("https://www.facebook.com/stories/12345")
-        assertTrue(result is VideoExtractor.Result.Error)
-        val message = (result as VideoExtractor.Result.Error).message
-        assertTrue(message.contains("Stories"))
+        assertTrue(result is VideoExtractor.Result.LoginRequired)
+        val login = result as VideoExtractor.Result.LoginRequired
+        assertEquals(Platform.FACEBOOK, login.platform)
+        assertTrue(login.message.contains("Login required"))
     }
 
     @Test
-    fun instagramStories_returnsClearError() = runBlocking {
+    fun instagramStories_requiresLogin() = runBlocking {
+        // Stories without a WebView session ask for login instead of a hard error.
         val result = extractor.extract("https://www.instagram.com/stories/user/12345/")
-        assertTrue(result is VideoExtractor.Result.Error)
-        val message = (result as VideoExtractor.Result.Error).message
-        assertTrue(message.contains("Stories"))
+        assertTrue(result is VideoExtractor.Result.LoginRequired)
+        val login = result as VideoExtractor.Result.LoginRequired
+        assertEquals(Platform.INSTAGRAM, login.platform)
+        assertTrue(login.message.contains("Login required"))
     }
 
     @Test

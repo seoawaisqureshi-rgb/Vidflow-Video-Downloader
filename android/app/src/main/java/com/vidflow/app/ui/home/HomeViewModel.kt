@@ -28,6 +28,8 @@ data class HomeUiState(
     val error: String? = null,
     val snackbarMessage: String? = null,
     val clipboardUrl: String? = null,
+    /** Set when extraction needs a WebView login (stories, login posts). */
+    val loginRequiredPlatform: com.vidflow.app.data.model.Platform? = null,
 )
 
 class HomeViewModel(app: Application) : AndroidViewModel(app) {
@@ -56,8 +58,25 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
 
     fun onUrlChanged(url: String) {
         _uiState.update {
-            it.copy(urlInput = url, error = null, videoInfo = null, selectedFormat = null)
+            it.copy(urlInput = url, error = null, videoInfo = null, selectedFormat = null, loginRequiredPlatform = null)
         }
+    }
+
+    /** Called by the Browser tab when a video is detected on a page. */
+    fun analyzeUrl(url: String) {
+        lastAutoAnalyzedUrl = null
+        lastAnalyzedUrl = null
+        _uiState.update {
+            it.copy(
+                urlInput = url, error = null, videoInfo = null,
+                selectedFormat = null, loginRequiredPlatform = null,
+            )
+        }
+        fetchInfo()
+    }
+
+    fun clearLoginRequired() {
+        _uiState.update { it.copy(loginRequiredPlatform = null) }
     }
 
     // Track the last URL that was auto-analyzed to avoid re-analysis on tab navigation
@@ -139,6 +158,14 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
                 is VideoExtractor.Result.Error -> {
                     _uiState.update { it.copy(isLoading = false, error = result.message) }
                 }
+                is VideoExtractor.Result.LoginRequired -> {
+                    _uiState.update {
+                        it.copy(
+                            isLoading = false, error = result.message,
+                            loginRequiredPlatform = result.platform,
+                        )
+                    }
+                }
             }
         }
     }
@@ -196,7 +223,7 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun dismissError() {
-        _uiState.update { it.copy(error = null) }
+        _uiState.update { it.copy(error = null, loginRequiredPlatform = null) }
     }
 
     fun dismissSnackbar() {

@@ -3,15 +3,12 @@ package com.vidflow.app.data.extractor
 import android.content.Context
 import android.util.Log
 import com.vidflow.app.data.model.Platform
+import com.vidflow.app.data.session.SessionCookies
 import com.vidflow.app.data.model.VideoFormat
 import com.vidflow.app.data.model.VideoInfo
 import com.yausername.youtubedl_android.YoutubeDL
 import com.yausername.youtubedl_android.YoutubeDLRequest
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.async
-import kotlinx.coroutines.coroutineScope
-import kotlinx.coroutines.selects.select
-import kotlinx.coroutines.withTimeoutOrNull
 import okhttp3.FormBody
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
@@ -36,13 +33,15 @@ class VideoExtractor(
     sealed class Result {
         data class Success(val info: VideoInfo) : Result()
         data class Error(val message: String, val recoverable: Boolean = false) : Result()
+        /** Content needs a WebView login first; the UI opens the Login tab. */
+        data class LoginRequired(val platform: Platform, val message: String) : Result()
     }
 
     suspend fun extract(rawUrl: String): Result {
         val url = normalizeUrl(rawUrl.trim())
         return when (Platform.fromUrl(url)) {
             Platform.YOUTUBE     -> YoutubeExtractor(client, context).extract(url)
-            Platform.TIKTOK      -> raceHttpAndYtDlp(url, Platform.TIKTOK) { TikTokExtractor(client).extract(url) }
+            Platform.TIKTOK      -> orderedChain(url, Platform.TIKTOK) { TikTokExtractor(client).extract(url) }
             Platform.FACEBOOK    -> extractFacebook(url)
             Platform.INSTAGRAM   -> extractInstagram(url)
             Platform.THREADS     -> extractThreads(url)
@@ -50,10 +49,15 @@ class VideoExtractor(
             Platform.TWITTER     -> TwitterExtractor(client).extract(url)
             Platform.VIMEO       -> VimeoExtractor(client).extract(url)
             Platform.DAILYMOTION -> DailymotionExtractor(client).extract(url)
-            Platform.PINTEREST   -> raceHttpAndYtDlp(url, Platform.PINTEREST) { PinterestExtractor(client).extract(url) }
+            Platform.PINTEREST   -> orderedChain(url, Platform.PINTEREST) { PinterestExtractor(client).extract(url) }
             Platform.UNKNOWN     -> {
                 val clean = url.substringBefore("?").lowercase()
-                if (clean.endsWith(".mp4") || clean.endsWith(".webm") ||
+                if (clean.endsWith(".m3u8") || clean.endsWith(".mpd")) {
+                    // HLS/DASH: never download the playlist file as the video.
+                    // yt-dlp fetches the segments and merges them on-device.
+                    tryYtDlp(url, Platform.UNKNOWN)
+                        ?: directStreamAsYtDlp(url)
+                } else if (clean.endsWith(".mp4") || clean.endsWith(".webm") ||
                     clean.endsWith(".mov") || clean.endsWith(".m4a") || clean.endsWith(".mp3")) {
                     GenericVideoExtractor().extract(url)
                 } else {
@@ -71,13 +75,16 @@ class VideoExtractor(
 
     private suspend fun extractFacebook(url: String): Result {
         val lower = url.lowercase()
-        if (lower.contains("/stories/") || lower.contains("story.php") || lower.contains("story_fbid")) {
-            return Result.Error(
-                "Facebook Stories cannot be downloaded — they expire after 24 hours and require login.\n\n" +
-                "Only public Facebook post videos and Reels are supported."
+        val isStory = lower.contains("/stories/") || lower.contains("story.php") ||
+            lower.contains("story_fbid")
+        val result = orderedChain(url, Platform.FACEBOOK) { FacebookExtractor(client).extract(url) }
+        if (result is Result.Success) return result
+        if (isStory && !SessionCookies.hasSession(Platform.FACEBOOK)) {
+            return Result.LoginRequired(
+                Platform.FACEBOOK, SessionCookies.loginRequiredMessage(Platform.FACEBOOK),
             )
         }
-        return raceHttpAndYtDlp(url, Platform.FACEBOOK) { FacebookExtractor(client).extract(url) }
+        return result
     }
 
     // ── Instagram ─────────────────────────────────────────────────────────────
@@ -88,25 +95,44 @@ class VideoExtractor(
     // NOTE: Never use specific format IDs for Instagram — causes 'requested format not available'
 
     private suspend fun extractInstagram(url: String): Result {
-        if (url.contains("/stories/", ignoreCase = true)) {
-            return Result.Error(
-                "Instagram Stories expire after 24 hours and usually require login.\n\n" +
-                "Try a public Reel or post link instead."
-            )
+        val isStory = url.contains("/stories/", ignoreCase = true) ||
+            url.contains("/story/", ignoreCase = true)
+        if (!isStory) {
+            val shortcode = url.regexFind("""/(p|reel|reels|tv)/([A-Za-z0-9_-]+)""", 2)
+                ?: return Result.Error("Invalid Instagram URL. Please use a direct post, reel, or video link.")
+            val result = orderedChain(url, Platform.INSTAGRAM) {
+                InstagramExtractor(client).extract(url)
+                    .takeIf { it is Result.Success }
+                    ?: tryInstagramAppApi(url, shortcode)
+                    ?: tryInstagramEmbed(url, shortcode)
+                    ?: Result.Error("Could not extract this Instagram post.")
+            }
+            if (result is Result.Success) return result
+            if (!SessionCookies.hasSession(Platform.INSTAGRAM)) {
+                return Result.LoginRequired(
+                    Platform.INSTAGRAM, SessionCookies.loginRequiredMessage(Platform.INSTAGRAM),
+                )
+            }
+            return result
         }
-        val shortcode = url.regexFind("""/(p|reel|reels|tv)/([A-Za-z0-9_-]+)""", 2)
-            ?: return Result.Error("Invalid Instagram URL. Please use a direct post, reel, or video link.")
-
-        return raceHttpAndYtDlp(url, Platform.INSTAGRAM) {
+        // Stories: same chain, with the WebView session attached (brief 2.3).
+        // A story link has no post shortcode, so the HTTP steps run against
+        // the story URL itself and yt-dlp gets the session cookies.
+        val result = orderedChain(url, Platform.INSTAGRAM) {
             InstagramExtractor(client).extract(url)
                 .takeIf { it is Result.Success }
-                ?: tryInstagramAppApi(url, shortcode)
-                ?: tryInstagramEmbed(url, shortcode)
-                ?: Result.Error(
-                    "Instagram requires login for this content.\n\n" +
-                    "Try: Open in browser → tap share → copy link → paste here"
-                )
+                ?: Result.Error("Story not reachable without a session.")
         }
+        if (result is Result.Success) return result
+        if (!SessionCookies.hasSession(Platform.INSTAGRAM)) {
+            return Result.LoginRequired(
+                Platform.INSTAGRAM, SessionCookies.loginRequiredMessage(Platform.INSTAGRAM),
+            )
+        }
+        return Result.Error(
+            "This Instagram story could not be downloaded. It may have expired " +
+                "(stories last 24 hours) or belong to a private account you do not follow.",
+        )
     }
 
     private fun tryInstagramAppApi(url: String, shortcode: String): Result? {
@@ -118,7 +144,6 @@ class VideoExtractor(
                 "X-IG-App-ID" to "936619743392459",
                 "X-IG-Capabilities" to "3brTvw==",
                 "Accept-Language" to "en-US",
-                "Cookie" to "",
             ))
 
             if (html != null) {
@@ -207,6 +232,7 @@ class VideoExtractor(
                 addOption("--no-check-certificates")
                 addOption("--extractor-retries", "3")
                 addOption("--socket-timeout", "20")
+                withSessionCookies(Platform.INSTAGRAM)
                 // Use Instagram app UA for better access
                 addOption("--user-agent",
                     "Instagram 269.0.0.18.75 Android (26/8.0.0; 480dpi; 1080x1920; OnePlus; ONEPLUS A3010; OnePlus3T; qcom; en_US; 314665256)")
@@ -274,7 +300,7 @@ class VideoExtractor(
     // ── Threads ───────────────────────────────────────────────────────────────
 
     private suspend fun extractThreads(url: String): Result {
-        return raceHttpAndYtDlp(url, Platform.THREADS) {
+        val result = orderedChain(url, Platform.THREADS) {
             ThreadsExtractor(client).extract(url)
                 .takeIf { it is Result.Success }
                 ?: tryThreadsScrape(url)
@@ -285,6 +311,16 @@ class VideoExtractor(
                     "• Try copying the direct post link from the Threads app"
                 )
         }
+        if (result is Result.Success) return result
+        val message = (result as? Result.Error)?.message ?: ""
+        if (message.contains("login", ignoreCase = true) &&
+            !SessionCookies.hasSession(Platform.THREADS)
+        ) {
+            return Result.LoginRequired(
+                Platform.THREADS, SessionCookies.loginRequiredMessage(Platform.THREADS),
+            )
+        }
+        return result
     }
 
     private fun tryThreadsScrape(url: String): Result? {
@@ -332,6 +368,7 @@ class VideoExtractor(
                 addOption("--no-check-certificates")
                 addOption("--extractor-retries", "5")
                 addOption("--socket-timeout", "30")
+                withSessionCookies(Platform.THREADS)
                 // Instagram UA works for Threads too (same backend)
                 addOption("--user-agent",
                     "Instagram 269.0.0.18.75 Android (26/8.0.0; 480dpi; 1080x1920; OnePlus; ONEPLUS A3010; OnePlus3T; qcom; en_US; 314665256)")
@@ -375,39 +412,57 @@ class VideoExtractor(
     // ── Generic helpers ───────────────────────────────────────────────────────
 
     /**
-     * Speed-optimized race: HTTP first (fast, 300-800ms), yt-dlp as fallback.
-     * HTTP runs first with a 5s timeout. If it fails, yt-dlp takes over.
-     * Both run on IO dispatcher — no blocking.
+     * Ordered extraction chain (brief 2.2 step 4, 3.4). One step at a time,
+     * stop at the first step that returns formats. Never run two extractors
+     * at the same time for the same URL, and no delayed-fallback timer.
+     * Step (a): platform page/API/oEmbed/JSON, 15s. Step (b): yt-dlp -J
+     * metadata only, 30s. Step (c): one clear error.
      */
-    private suspend fun raceHttpAndYtDlp(
+    private suspend fun orderedChain(
         url: String,
         platform: Platform,
         http: () -> Result,
     ): Result = kotlinx.coroutines.withContext(Dispatchers.IO) {
-        // Fast path: lightweight HTTP (no Python startup, instant)
-        val fastHttpResult = try {
-            withTimeoutOrNull(5_000L) { http() }
-        } catch (e: Exception) {
-            null
+        val fastResult = runBlockingWithTimeout(15_000L) { http() }
+
+        if (fastResult is Result.Success && fastResult.info.formats.isNotEmpty()) {
+            return@withContext fastResult
         }
 
-        if (fastHttpResult is Result.Success && fastHttpResult.info.formats.isNotEmpty()) {
-            return@withContext fastHttpResult
-        }
-
-        // Fallback: yt-dlp (slower but handles any public video)
         if (context != null) {
-            val platformSpecific = when (platform) {
-                Platform.INSTAGRAM -> withTimeoutOrNull(25_000L) { tryYtDlpInstagram(url) }
-                Platform.THREADS   -> withTimeoutOrNull(25_000L) { tryYtDlpThreads(url) }
-                else               -> withTimeoutOrNull(20_000L) { tryYtDlp(url, platform) }
+            val ytDlpResult = when (platform) {
+                Platform.INSTAGRAM -> runBlockingWithTimeout(30_000L) { tryYtDlpInstagram(url) }
+                Platform.THREADS -> runBlockingWithTimeout(30_000L) { tryYtDlpThreads(url) }
+                else -> runBlockingWithTimeout(30_000L) { tryYtDlp(url, platform) }
             }
-            if (platformSpecific is Result.Success && platformSpecific.info.formats.isNotEmpty()) {
-                return@withContext platformSpecific
+            if (ytDlpResult is Result.Success && ytDlpResult.info.formats.isNotEmpty()) {
+                return@withContext ytDlpResult
             }
         }
 
-        fastHttpResult ?: Result.Error("Could not extract video from this URL. Please verify the link is public and try again.")
+        fastResult ?: Result.Error("Could not extract video from this URL. Please verify the link is public and try again.")
+    }
+
+    /** Single needsYtDlp format for a raw HLS/DASH URL yt-dlp could not describe. */
+    private fun directStreamAsYtDlp(url: String): Result {
+        return Result.Success(VideoInfo(
+            url = url, title = "Stream Video", thumbnail = null,
+            duration = null, uploader = null, platform = Platform.UNKNOWN,
+            formats = listOf(VideoFormat(
+                formatId = "best", quality = "Best Quality", ext = "mp4",
+                filesize = null, fps = null, vcodec = "h264", acodec = "aac",
+                hasVideo = true, hasAudio = true, downloadUrl = "",
+                needsYtDlp = true, ytDlpFormatSelector = "best",
+            )),
+        ))
+    }
+
+    /** Attaches the WebView session to a yt-dlp request, when one exists. */
+    private fun YoutubeDLRequest.withSessionCookies(platform: Platform): YoutubeDLRequest {
+        val ctx = context ?: return this
+        val cookiesFile = SessionCookies.writeCookiesTxt(ctx, platform) ?: return this
+        addOption("--cookies", cookiesFile.absolutePath)
+        return this
     }
 
     internal fun tryYtDlp(url: String, platform: Platform): Result? {
@@ -418,6 +473,7 @@ class VideoExtractor(
                 addOption("--no-warnings")
                 addOption("--no-check-certificates")
                 addOption("--socket-timeout", "15")
+                withSessionCookies(platform)
             }
             val info = YoutubeDL.getInstance().getInfo(req)
             parseYtDlpClean(url, info, platform)
@@ -542,10 +598,21 @@ class VideoExtractor(
 
 // ── Shared helpers ────────────────────────────────────────────────────────────
 
+/**
+ * Every platform request automatically carries the WebView session cookie
+ * for its host when the user is logged in (brief 2.3 step 4). An explicit
+ * non-empty Cookie header from the caller still wins.
+ */
+internal fun OkHttpClient.sessionCookieHeader(url: String, headers: Map<String, String>): String? {
+    val explicit = headers["Cookie"]?.takeIf { it.isNotBlank() }
+    return explicit ?: SessionCookies.getCookieHeader(url)
+}
+
 internal fun OkHttpClient.getJson(url: String, headers: Map<String, String> = emptyMap()): JSONObject? {
     val req = Request.Builder().url(url).apply {
         addHeader("User-Agent", "Mozilla/5.0 (Android 14; Mobile) AppleWebKit/537.36")
-        headers.forEach { (k, v) -> addHeader(k, v) }
+        sessionCookieHeader(url, headers)?.let { addHeader("Cookie", it) }
+        headers.filterKeys { it != "Cookie" }.forEach { (k, v) -> addHeader(k, v) }
     }.build()
     return try {
         newCall(req).execute().use { resp ->
@@ -557,7 +624,8 @@ internal fun OkHttpClient.getJson(url: String, headers: Map<String, String> = em
 internal fun OkHttpClient.getText(url: String, headers: Map<String, String> = emptyMap()): String? {
     val req = Request.Builder().url(url).apply {
         addHeader("User-Agent", "Mozilla/5.0 (Android 14; Mobile) AppleWebKit/537.36")
-        headers.forEach { (k, v) -> addHeader(k, v) }
+        sessionCookieHeader(url, headers)?.let { addHeader("Cookie", it) }
+        headers.filterKeys { it != "Cookie" }.forEach { (k, v) -> addHeader(k, v) }
     }.build()
     return try {
         newCall(req).execute().use { resp ->
@@ -574,7 +642,8 @@ internal fun OkHttpClient.postForm(
     val body = FormBody.Builder().apply { form.forEach { (k, v) -> add(k, v) } }.build()
     val req = Request.Builder().url(url).post(body).apply {
         addHeader("User-Agent", "Mozilla/5.0 (Android 14; Mobile) AppleWebKit/537.36")
-        headers.forEach { (k, v) -> addHeader(k, v) }
+        sessionCookieHeader(url, headers)?.let { addHeader("Cookie", it) }
+        headers.filterKeys { it != "Cookie" }.forEach { (k, v) -> addHeader(k, v) }
     }.build()
     return try {
         newCall(req).execute().use { resp ->
@@ -592,7 +661,8 @@ internal fun OkHttpClient.postJson(
     val req = Request.Builder().url(url).post(body).apply {
         addHeader("User-Agent", "VidFlow/1.1")
         addHeader("Accept", "application/json")
-        headers.forEach { (k, v) -> addHeader(k, v) }
+        sessionCookieHeader(url, headers)?.let { addHeader("Cookie", it) }
+        headers.filterKeys { it != "Cookie" }.forEach { (k, v) -> addHeader(k, v) }
     }.build()
     return try {
         newCall(req).execute().use { resp ->
@@ -610,4 +680,33 @@ internal fun Long.toReadableSize(): String {
     val kb = this / 1024
     val mb = kb / 1024
     return if (mb > 0) "${mb}MB" else "${kb}KB"
+}
+
+/**
+ * Runs a blocking step (OkHttp call, yt-dlp metadata fetch) with a real
+ * deadline. withTimeoutOrNull cannot interrupt a thread blocked in socket
+ * I/O, so a "15s timeout" around a blocking call would silently wait up to
+ * the OkHttp read timeout instead. This runs the step on a daemon thread
+ * and returns null on deadline; the orphaned thread is left to finish its
+ * socket timeout on its own and is never joined.
+ */
+internal fun <T> runBlockingWithTimeout(timeoutMs: Long, block: () -> T): T? {
+    val future = TimeoutExecutor.submit(block)
+    return try {
+        future.get(timeoutMs, java.util.concurrent.TimeUnit.MILLISECONDS)
+    } catch (_: java.util.concurrent.TimeoutException) {
+        future.cancel(true)
+        null
+    } catch (_: Exception) {
+        null
+    }
+}
+
+private object TimeoutExecutor {
+    private val executor = java.util.concurrent.Executors.newCachedThreadPool { runnable ->
+        Thread(runnable, "VidFlow-timeout-worker").apply { isDaemon = true }
+    }
+
+    fun <T> submit(block: () -> T): java.util.concurrent.Future<T> =
+        executor.submit<T>(java.util.concurrent.Callable(block))
 }
