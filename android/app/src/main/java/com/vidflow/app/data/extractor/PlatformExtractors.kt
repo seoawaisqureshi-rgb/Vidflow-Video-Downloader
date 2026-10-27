@@ -484,6 +484,31 @@ internal class InstagramExtractor(private val client: OkHttpClient) {
         )
     }
 
+    private fun success(url: String, title: String, thumb: String?, videoUrl: String) =
+        VideoExtractor.Result.Success(VideoInfo(
+            url = url,
+            title = title.replace(" • Instagram", "").trim().ifEmpty { "Instagram Video" },
+            thumbnail = thumb, duration = null, uploader = "Instagram",
+            platform = Platform.INSTAGRAM,
+            formats = listOf(VideoFormat(
+                formatId = "hd", quality = "HD", ext = "mp4",
+                filesize = null, fps = 30, vcodec = "h264", acodec = "aac",
+                hasVideo = true, hasAudio = true, downloadUrl = videoUrl,
+            )),
+        ))
+
+    private fun firstMp4(text: String): String? {
+        val patterns = listOf(
+            """<a[^>]+href="(https://[^"]+\.mp4[^"]*)"""",
+            """"(https://[^"]+\.mp4[^"]*)"""",
+            """href=\\?"(https:[^"\\]+\.mp4[^"\\]*)""",
+            """<video[^>]+src="(https?://[^"]+)"""",
+            """<meta property="og:video" content="([^"]+)"""",
+        )
+        return patterns.firstNotNullOfOrNull { text.regexFind(it)?.unescape()?.replace("\\/", "/") }
+            ?.takeIf { it.startsWith("http") }
+    }
+
     private fun tryEmbed(url: String, cleanUrl: String, shortcode: String): VideoExtractor.Result? {
         val oembedUrl = "https://www.instagram.com/oembed/?url=${java.net.URLEncoder.encode(cleanUrl, "UTF-8")}&omitscript=true"
         val oembedJson = client.getJson(oembedUrl, mapOf(
