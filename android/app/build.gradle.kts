@@ -112,6 +112,9 @@ dependencies {
   implementation(libs.androidx.room.ktx)
   ksp(libs.androidx.room.compiler)
 
+  // DocumentFile for Storage Access Framework (WhatsApp status access)
+  implementation("androidx.documentfile:documentfile:1.0.1")
+
   // YoutubeDL Android — yt-dlp on-device + FFmpeg for DASH merging.
   // FFmpeg is needed to merge separate video+audio streams for YouTube 1080p/720p.
   implementation("io.github.junkfood02.youtubedl-android:library:0.18.1")

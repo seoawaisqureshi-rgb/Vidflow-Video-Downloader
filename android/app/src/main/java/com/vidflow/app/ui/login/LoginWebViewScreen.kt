@@ -211,6 +211,37 @@ fun LoginWebViewScreen(
                                 isLoadingPage = false
                                 refreshLoginState()
                             }
+
+                            override fun shouldOverrideUrlLoading(
+                                view: WebView,
+                                request: android.webkit.WebResourceRequest
+                            ): Boolean {
+                                val uri = request.url ?: return false
+                                val urlStr = uri.toString()
+                                val scheme = uri.scheme?.lowercase() ?: ""
+                                if (scheme == "intent" || urlStr.startsWith("intent://")) {
+                                    try {
+                                        val intent = android.content.Intent.parseUri(urlStr, android.content.Intent.URI_INTENT_SCHEME)
+                                        val fallback = intent.getStringExtra("browser_fallback_url")
+                                        if (!fallback.isNullOrBlank()) {
+                                            view.loadUrl(fallback)
+                                            return true
+                                        }
+                                        val data = intent.data
+                                        if (data != null && (data.scheme == "http" || data.scheme == "https")) {
+                                            view.loadUrl(data.toString())
+                                            return true
+                                        }
+                                    } catch (e: Exception) {
+                                        // ignore
+                                    }
+                                    return true
+                                }
+                                if (scheme != "http" && scheme != "https") {
+                                    return true
+                                }
+                                return false
+                            }
                         }
                         webViewRef = this
                         loadUrl(selected.loginUrl)

@@ -51,20 +51,30 @@ fun MainNavigation(
     Scaffold(
         containerColor = Background,
         bottomBar = {
-            Column(modifier = Modifier.fillMaxWidth()) {
-                // Persistent Mini-Player Bar (Music & Video)
-                MiniPlayerBar(
-                    onExpand = { showFullScreenPlayer = true }
-                )
-                HorizontalDivider(thickness = 0.5.dp, color = Outline)
-                VidFlowBottomBar(
-                    selectedTab = selectedTab,
-                    onTabSelected = { tab ->
-                        showWhatsAppSaver = false
-                        showLoginScreen = false
-                        selectedTab = tab
-                    },
-                )
+            Surface(
+                color = Surface,
+                tonalElevation = 6.dp,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .navigationBarsPadding()
+                ) {
+                    // Persistent Mini-Player Bar (Music & Video)
+                    MiniPlayerBar(
+                        onExpand = { showFullScreenPlayer = true }
+                    )
+                    HorizontalDivider(thickness = 0.5.dp, color = Outline.copy(alpha = 0.5f))
+                    VidFlowBottomBar(
+                        selectedTab = selectedTab,
+                        onTabSelected = { tab ->
+                            showWhatsAppSaver = false
+                            showLoginScreen = false
+                            selectedTab = tab
+                        },
+                    )
+                }
             }
         },
     ) { innerPadding ->
@@ -146,10 +156,11 @@ private fun VidFlowBottomBar(
     onTabSelected: (MainNavTab) -> Unit,
 ) {
     NavigationBar(
-        containerColor = Surface.copy(alpha = 0.96f),
+        containerColor = Surface,
         contentColor = TextSecondary,
         tonalElevation = 0.dp,
-        modifier = Modifier.fillMaxWidth().height(62.dp)
+        windowInsets = WindowInsets(0, 0, 0, 0),
+        modifier = Modifier.fillMaxWidth().height(60.dp)
     ) {
         MainNavTab.entries.forEach { tab ->
             val selected = tab == selectedTab

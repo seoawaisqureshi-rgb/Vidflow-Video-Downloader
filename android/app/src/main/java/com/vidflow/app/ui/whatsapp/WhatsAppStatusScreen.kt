@@ -1,11 +1,15 @@
 package com.vidflow.app.ui.whatsapp
 
+import android.content.ContentValues
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
 import android.os.Environment
+import android.provider.MediaStore
 import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -17,6 +21,8 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material.icons.automirrored.rounded.Chat
+import androidx.compose.material.icons.automirrored.rounded.OpenInNew
 import androidx.compose.material.icons.rounded.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -31,12 +37,15 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
+import androidx.documentfile.provider.DocumentFile
 import coil.compose.AsyncImage
 import com.vidflow.app.theme.*
 import java.io.File
+import java.io.IOException
 
 data class WhatsAppStatusItem(
-    val file: File,
+    val uri: Uri,
+    val name: String,
     val isVideo: Boolean,
     val sizeBytes: Long,
     val lastModified: Long,
@@ -49,40 +58,92 @@ fun WhatsAppStatusScreen(
     modifier: Modifier = Modifier,
 ) {
     val context = LocalContext.current
+    val prefs = remember { context.getSharedPreferences("whatsapp_status_prefs", Context.MODE_PRIVATE) }
     var showStatusGrid by remember { mutableStateOf(false) }
     var statusItems by remember { mutableStateOf<List<WhatsAppStatusItem>>(emptyList()) }
     var selectedPreviewItem by remember { mutableStateOf<WhatsAppStatusItem?>(null) }
     var isLoading by remember { mutableStateOf(false) }
 
+    // SAF folder permission launcher for Android 11+
+    val folderLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocumentTree()
+    ) { uri ->
+        if (uri != null) {
+            try {
+                context.contentResolver.takePersistableUriPermission(
+                    uri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION
+                )
+                prefs.edit().putString("tree_uri", uri.toString()).apply()
+            } catch (e: Exception) {
+                // Ignore
+            }
+        }
+    }
+
     fun loadStatuses() {
         isLoading = true
         val list = mutableListOf<WhatsAppStatusItem>()
+
+        // 1. First, check saved SAF permission (Android 11+)
+        val savedUriStr = prefs.getString("tree_uri", null)
+        if (!savedUriStr.isNullOrBlank()) {
+            try {
+                val treeUri = Uri.parse(savedUriStr)
+                val docDir = DocumentFile.fromTreeUri(context, treeUri)
+                docDir?.listFiles()?.forEach { doc ->
+                    val name = doc.name?.lowercase() ?: ""
+                    if (doc.isFile && (name.endsWith(".mp4") || name.endsWith(".jpg") || name.endsWith(".jpeg") || name.endsWith(".png"))) {
+                        list.add(
+                            WhatsAppStatusItem(
+                                uri = doc.uri,
+                                name = doc.name ?: "status_${System.currentTimeMillis()}",
+                                isVideo = name.endsWith(".mp4"),
+                                sizeBytes = doc.length(),
+                                lastModified = doc.lastModified(),
+                            )
+                        )
+                    }
+                }
+            } catch (e: Exception) {
+                // Ignore SAF read error
+            }
+        }
+
+        // 2. Direct File scan fallback (Works on Android 10 and below, or accessible directories)
         val possibleDirs = listOf(
-            // Android 11+ storage paths
             File(Environment.getExternalStorageDirectory(), "Android/media/com.whatsapp/WhatsApp/Media/.Statuses"),
             File(Environment.getExternalStorageDirectory(), "Android/media/com.whatsapp.w4b/WhatsApp Business/Media/.Statuses"),
-            // Legacy storage paths
             File(Environment.getExternalStorageDirectory(), "WhatsApp/Media/.Statuses"),
             File(Environment.getExternalStorageDirectory(), "WhatsApp Business/Media/.Statuses"),
         )
 
         for (dir in possibleDirs) {
-            if (dir.exists() && dir.isDirectory) {
-                dir.listFiles()?.forEach { file ->
-                    val name = file.name.lowercase()
-                    if (file.isFile && (name.endsWith(".mp4") || name.endsWith(".jpg") || name.endsWith(".jpeg") || name.endsWith(".png"))) {
-                        list.add(
-                            WhatsAppStatusItem(
-                                file = file,
-                                isVideo = name.endsWith(".mp4"),
-                                sizeBytes = file.length(),
-                                lastModified = file.lastModified(),
-                            )
-                        )
+            try {
+                if (dir.exists() && dir.isDirectory) {
+                    dir.listFiles()?.forEach { file ->
+                        val name = file.name.lowercase()
+                        if (file.isFile && (name.endsWith(".mp4") || name.endsWith(".jpg") || name.endsWith(".jpeg") || name.endsWith(".png"))) {
+                            // Avoid duplicates
+                            if (list.none { it.name == file.name }) {
+                                list.add(
+                                    WhatsAppStatusItem(
+                                        uri = Uri.fromFile(file),
+                                        name = file.name,
+                                        isVideo = name.endsWith(".mp4"),
+                                        sizeBytes = file.length(),
+                                        lastModified = file.lastModified(),
+                                    )
+                                )
+                            }
+                        }
                     }
                 }
+            } catch (e: Exception) {
+                // Ignore
             }
         }
+
         statusItems = list.sortedByDescending { it.lastModified }
         isLoading = false
         showStatusGrid = true
@@ -101,7 +162,7 @@ fun WhatsAppStatusScreen(
                             contentAlignment = Alignment.Center
                         ) {
                             Icon(
-                                Icons.Rounded.Chat,
+                                Icons.AutoMirrored.Rounded.Chat,
                                 contentDescription = null,
                                 tint = Color.White,
                                 modifier = Modifier.size(18.dp)
@@ -140,23 +201,15 @@ fun WhatsAppStatusScreen(
                 .padding(innerPadding)
         ) {
             if (!showStatusGrid) {
-                // The exact 2-step "How it works" screen requested by user
                 WhatsAppHowItWorksCard(
                     onOpenWhatsApp = {
-                        val launchIntent = context.packageManager.getLaunchIntentForPackage("com.whatsapp")
-                            ?: context.packageManager.getLaunchIntentForPackage("com.whatsapp.w4b")
-                        if (launchIntent != null) {
-                            context.startActivity(launchIntent)
-                        } else {
-                            Toast.makeText(context, "WhatsApp is not installed on this device", Toast.LENGTH_SHORT).show()
-                        }
+                        openWhatsAppSafely(context)
                     },
                     onCheckStatuses = {
                         loadStatuses()
                     }
                 )
             } else {
-                // Status Grid View
                 if (isLoading) {
                     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
                         CircularProgressIndicator(color = Accent)
@@ -184,12 +237,29 @@ fun WhatsAppStatusScreen(
                             )
                             Spacer(Modifier.height(6.dp))
                             Text(
-                                "1. Open WhatsApp & view any status completely.\n2. Come back here & tap Refresh.",
+                                "1. Open WhatsApp & view any status completely.\n2. Tap below if folder permission is required.",
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = TextSecondary,
                                 textAlign = TextAlign.Center
                             )
                             Spacer(Modifier.height(16.dp))
+
+                            // Grant permission button for Android 11+
+                            Button(
+                                onClick = {
+                                    val initUri = Uri.parse("content://com.android.externalstorage.documents/document/primary%3AAndroid%2Fmedia%2Fcom.whatsapp%2FWhatsApp%2FMedia%2F.Statuses")
+                                    folderLauncher.launch(initUri)
+                                },
+                                colors = ButtonDefaults.buttonColors(containerColor = SurfaceVariant, contentColor = TextPrimary),
+                                shape = RoundedCornerShape(20.dp)
+                            ) {
+                                Icon(Icons.Rounded.FolderShared, contentDescription = null, modifier = Modifier.size(18.dp), tint = Accent)
+                                Spacer(Modifier.width(8.dp))
+                                Text("Grant Statuses Folder Access")
+                            }
+
+                            Spacer(Modifier.height(10.dp))
+
                             Button(
                                 onClick = { loadStatuses() },
                                 colors = ButtonDefaults.buttonColors(containerColor = Accent, contentColor = Background),
@@ -197,7 +267,7 @@ fun WhatsAppStatusScreen(
                             ) {
                                 Icon(Icons.Rounded.Refresh, contentDescription = null, modifier = Modifier.size(18.dp))
                                 Spacer(Modifier.width(6.dp))
-                                Text("Check Again")
+                                Text("Check Again", fontWeight = FontWeight.Bold)
                             }
                         }
                     }
@@ -235,6 +305,40 @@ fun WhatsAppStatusScreen(
     }
 }
 
+private fun openWhatsAppSafely(context: Context) {
+    val pm = context.packageManager
+    val packages = listOf("com.whatsapp", "com.whatsapp.w4b")
+    for (pkg in packages) {
+        val launchIntent = pm.getLaunchIntentForPackage(pkg)
+        if (launchIntent != null) {
+            launchIntent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
+            context.startActivity(launchIntent)
+            return
+        }
+    }
+
+    // Fallback: try by intent scheme
+    try {
+        val intent = Intent(Intent.ACTION_VIEW, Uri.parse("whatsapp://send"))
+        intent.flags = Intent.FLAG_ACTIVITY_NEW_TASK
+        context.startActivity(intent)
+        return
+    } catch (e: Exception) {
+        // Fallback: try launcher category
+        try {
+            val direct = Intent(Intent.ACTION_MAIN).apply {
+                addCategory(Intent.CATEGORY_LAUNCHER)
+                setPackage("com.whatsapp")
+                flags = Intent.FLAG_ACTIVITY_NEW_TASK
+            }
+            context.startActivity(direct)
+            return
+        } catch (e2: Exception) {
+            Toast.makeText(context, "WhatsApp is not installed on this device", Toast.LENGTH_SHORT).show()
+        }
+    }
+}
+
 @Composable
 private fun WhatsAppHowItWorksCard(
     onOpenWhatsApp: () -> Unit,
@@ -248,106 +352,121 @@ private fun WhatsAppHowItWorksCard(
         verticalArrangement = Arrangement.Center
     ) {
         Surface(
-            shape = RoundedCornerShape(24.dp),
             color = Surface,
-            tonalElevation = 2.dp,
+            shape = RoundedCornerShape(24.dp),
+            tonalElevation = 4.dp,
             modifier = Modifier.fillMaxWidth()
         ) {
-            Column(modifier = Modifier.padding(24.dp)) {
+            Column(
+                modifier = Modifier.padding(22.dp),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(68.dp)
+                        .clip(CircleShape)
+                        .background(Color(0xFF25D366).copy(alpha = 0.15f)),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        Icons.AutoMirrored.Rounded.Chat,
+                        contentDescription = null,
+                        tint = Color(0xFF25D366),
+                        modifier = Modifier.size(36.dp)
+                    )
+                }
+
+                Spacer(Modifier.height(16.dp))
+
                 Text(
                     "How It Works",
                     style = MaterialTheme.typography.titleLarge,
                     fontWeight = FontWeight.Bold,
-                    color = Accent,
-                    modifier = Modifier.fillMaxWidth(),
+                    color = TextPrimary
+                )
+
+                Spacer(Modifier.height(8.dp))
+
+                Text(
+                    "Save photos & videos from your friends' WhatsApp statuses directly to your gallery in 2 simple steps:",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = TextSecondary,
                     textAlign = TextAlign.Center
                 )
+
                 Spacer(Modifier.height(20.dp))
 
                 // Step 1
-                Row(verticalAlignment = Alignment.Top) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
                     Box(
                         modifier = Modifier
-                            .size(32.dp)
+                            .size(34.dp)
                             .clip(CircleShape)
-                            .background(AccentDeep),
+                            .background(AccentGlow),
                         contentAlignment = Alignment.Center
                     ) {
-                        Text("1", color = Color.White, fontWeight = FontWeight.Bold)
+                        Text("1", color = Accent, fontWeight = FontWeight.Bold)
                     }
-                    Spacer(Modifier.width(14.dp))
-                    Column {
-                        Text(
-                            "Step 1: Open WhatsApp and view the status.",
-                            style = MaterialTheme.typography.bodyLarge,
-                            fontWeight = FontWeight.SemiBold,
-                            color = TextPrimary
-                        )
-                        Spacer(Modifier.height(4.dp))
-                        Text(
-                            "Watch the photo or video status you want to save.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = TextSecondary
-                        )
-                    }
+                    Spacer(Modifier.width(12.dp))
+                    Text(
+                        "Open WhatsApp and view the status you want to save.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = TextPrimary
+                    )
                 }
 
-                Spacer(Modifier.height(18.dp))
+                Spacer(Modifier.height(14.dp))
 
                 // Step 2
-                Row(verticalAlignment = Alignment.Top) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
                     Box(
                         modifier = Modifier
-                            .size(32.dp)
+                            .size(34.dp)
                             .clip(CircleShape)
-                            .background(Accent),
+                            .background(AccentGlow),
                         contentAlignment = Alignment.Center
                     ) {
-                        Text("2", color = Background, fontWeight = FontWeight.Bold)
+                        Text("2", color = Accent, fontWeight = FontWeight.Bold)
                     }
-                    Spacer(Modifier.width(14.dp))
-                    Column {
-                        Text(
-                            "Step 2: Then come back here and click on the download button.",
-                            style = MaterialTheme.typography.bodyLarge,
-                            fontWeight = FontWeight.SemiBold,
-                            color = TextPrimary
-                        )
-                        Spacer(Modifier.height(4.dp))
-                        Text(
-                            "All viewed statuses will appear with one-tap download.",
-                            style = MaterialTheme.typography.bodySmall,
-                            color = TextSecondary
-                        )
-                    }
+                    Spacer(Modifier.width(12.dp))
+                    Text(
+                        "Come back to VidFlow and tap Download Statuses.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = TextPrimary
+                    )
                 }
 
                 Spacer(Modifier.height(24.dp))
 
-                // Action 1: Open WhatsApp
+                // Step 1 Action Button
                 OutlinedButton(
                     onClick = onOpenWhatsApp,
-                    shape = RoundedCornerShape(16.dp),
-                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFF25D366)),
+                    shape = RoundedCornerShape(14.dp),
                     modifier = Modifier.fillMaxWidth().height(48.dp)
                 ) {
-                    Icon(Icons.Rounded.OpenInNew, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Icon(Icons.AutoMirrored.Rounded.OpenInNew, contentDescription = null, modifier = Modifier.size(18.dp))
                     Spacer(Modifier.width(8.dp))
-                    Text("Open WhatsApp", fontWeight = FontWeight.Bold)
+                    Text("1. Open WhatsApp", fontWeight = FontWeight.SemiBold)
                 }
 
-                Spacer(Modifier.height(12.dp))
+                Spacer(Modifier.height(10.dp))
 
-                // Action 2: View Statuses / Download
+                // Step 2 Action Button
                 Button(
                     onClick = onCheckStatuses,
-                    shape = RoundedCornerShape(16.dp),
                     colors = ButtonDefaults.buttonColors(containerColor = Accent, contentColor = Background),
+                    shape = RoundedCornerShape(14.dp),
                     modifier = Modifier.fillMaxWidth().height(48.dp)
                 ) {
-                    Icon(Icons.Rounded.Download, contentDescription = null, modifier = Modifier.size(20.dp))
+                    Icon(Icons.Rounded.Download, contentDescription = null, modifier = Modifier.size(18.dp))
                     Spacer(Modifier.width(8.dp))
-                    Text("View & Download Statuses", fontWeight = FontWeight.Bold)
+                    Text("2. View & Download Statuses", fontWeight = FontWeight.Bold)
                 }
             }
         }
@@ -368,32 +487,28 @@ private fun StatusGridItem(
             .clickable(onClick = onClick)
     ) {
         AsyncImage(
-            model = item.file,
+            model = item.uri,
             contentDescription = null,
             contentScale = ContentScale.Crop,
             modifier = Modifier.fillMaxSize()
         )
 
-        // Video indicator badge
+        // Video Badge
         if (item.isVideo) {
             Box(
                 modifier = Modifier
                     .align(Alignment.TopStart)
                     .padding(6.dp)
-                    .clip(RoundedCornerShape(6.dp))
-                    .background(Color.Black.copy(alpha = 0.6f))
-                    .padding(horizontal = 6.dp, vertical = 2.dp)
+                    .clip(RoundedCornerShape(4.dp))
+                    .background(Color.Black.copy(alpha = 0.65f))
+                    .padding(horizontal = 4.dp, vertical = 2.dp)
             ) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Icon(
-                        Icons.Rounded.PlayArrow,
-                        contentDescription = "Video",
-                        tint = Color.White,
-                        modifier = Modifier.size(14.dp)
-                    )
-                    Spacer(Modifier.width(2.dp))
-                    Text("VIDEO", color = Color.White, fontSize = 9.sp, fontWeight = FontWeight.Bold)
-                }
+                Icon(
+                    Icons.Rounded.PlayArrow,
+                    contentDescription = "Video",
+                    tint = Color.White,
+                    modifier = Modifier.size(14.dp)
+                )
             }
         }
 
@@ -441,7 +556,7 @@ private fun StatusPreviewDialog(
                         .background(Color.Black)
                 ) {
                     AsyncImage(
-                        model = item.file,
+                        model = item.uri,
                         contentDescription = null,
                         contentScale = ContentScale.Fit,
                         modifier = Modifier.fillMaxSize()
@@ -504,12 +619,39 @@ private fun StatusPreviewDialog(
 
 private fun saveStatus(context: Context, item: WhatsAppStatusItem) {
     try {
-        val destDir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "VidFlow")
-        destDir.mkdirs()
-        val destFile = File(destDir, "status_${System.currentTimeMillis()}_${item.file.name}")
-        item.file.copyTo(destFile, overwrite = true)
+        val resolver = context.contentResolver
+        val values = ContentValues().apply {
+            put(MediaStore.MediaColumns.DISPLAY_NAME, "status_${System.currentTimeMillis()}_${item.name}")
+            put(MediaStore.MediaColumns.MIME_TYPE, if (item.isVideo) "video/mp4" else "image/jpeg")
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                put(MediaStore.MediaColumns.RELATIVE_PATH, "${Environment.DIRECTORY_DOWNLOADS}/VidFlow")
+            }
+        }
+        val targetCollection = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            MediaStore.Downloads.EXTERNAL_CONTENT_URI
+        } else {
+            if (item.isVideo) MediaStore.Video.Media.EXTERNAL_CONTENT_URI else MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+        }
+        val targetUri = resolver.insert(targetCollection, values) ?: throw IOException("Could not create MediaStore entry")
+        resolver.openInputStream(item.uri)?.use { inStream ->
+            resolver.openOutputStream(targetUri)?.use { outStream ->
+                inStream.copyTo(outStream)
+            }
+        }
         Toast.makeText(context, "Saved to Downloads/VidFlow!", Toast.LENGTH_SHORT).show()
     } catch (e: Exception) {
-        Toast.makeText(context, "Failed to save: ${e.message}", Toast.LENGTH_LONG).show()
+        try {
+            val destDir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "VidFlow")
+            destDir.mkdirs()
+            val destFile = File(destDir, "status_${System.currentTimeMillis()}_${item.name}")
+            context.contentResolver.openInputStream(item.uri)?.use { input ->
+                destFile.outputStream().use { output ->
+                    input.copyTo(output)
+                }
+            }
+            Toast.makeText(context, "Saved to Downloads/VidFlow!", Toast.LENGTH_SHORT).show()
+        } catch (e2: Exception) {
+            Toast.makeText(context, "Failed to save: ${e2.message}", Toast.LENGTH_LONG).show()
+        }
     }
 }
