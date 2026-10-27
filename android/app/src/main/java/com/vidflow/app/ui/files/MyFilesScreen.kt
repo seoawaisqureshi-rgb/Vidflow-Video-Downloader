@@ -56,18 +56,27 @@ fun MyFilesScreen(
     val context = LocalContext.current
     val historyRecords by historyVm.downloads.collectAsState()
     val activeDownloadsMap by DownloadService.downloads.collectAsState()
-    val activeList = remember(activeDownloadsMap) { activeDownloadsMap.values.toList() }
+    val activeList = remember(activeDownloadsMap) {
+        activeDownloadsMap.values.filter {
+            it.state is ServiceState.Downloading || it.state is ServiceState.Paused
+        }
+    }
+    val activeTitles = remember(activeList) { activeList.map { it.title }.toSet() }
 
     var selectedTab by remember { mutableStateOf(FileFilterTab.ALL) }
     var searchQuery by remember { mutableStateOf("") }
     var showDeleteConfirmDialog by remember { mutableStateOf(false) }
 
-    val filteredRecords = remember(historyRecords, selectedTab, searchQuery) {
+    val filteredRecords = remember(historyRecords, selectedTab, searchQuery, activeTitles) {
         historyRecords.filter { record ->
             val matchesQuery = searchQuery.isBlank() || record.title.contains(searchQuery, ignoreCase = true)
+            // While a video is actively downloading in activeList, hide its partial DB row
+            if (record.title in activeTitles && (record.status == DownloadStatus.DOWNLOADING || record.status == DownloadStatus.QUEUED)) {
+                return@filter false
+            }
             val matchesTab = when (selectedTab) {
-                FileFilterTab.ALL -> true
-                FileFilterTab.DOWNLOADING -> record.status == DownloadStatus.DOWNLOADING || record.status == DownloadStatus.QUEUED
+                FileFilterTab.ALL -> record.status == DownloadStatus.COMPLETED || record.status == DownloadStatus.FAILED || record.status == DownloadStatus.CANCELLED
+                FileFilterTab.DOWNLOADING -> false
                 FileFilterTab.COMPLETED -> record.status == DownloadStatus.COMPLETED
                 FileFilterTab.FAILED -> record.status == DownloadStatus.FAILED || record.status == DownloadStatus.CANCELLED
             }
@@ -146,13 +155,16 @@ fun MyFilesScreen(
                     .padding(horizontal = 16.dp, vertical = 8.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
+                val completedCount = historyRecords.count { it.status == DownloadStatus.COMPLETED }
+                val failedCount = historyRecords.count { it.status == DownloadStatus.FAILED || it.status == DownloadStatus.CANCELLED }
+
                 FileFilterTab.entries.forEach { tab ->
                     val isSelected = tab == selectedTab
                     val count = when (tab) {
-                        FileFilterTab.ALL -> historyRecords.size + activeList.size
+                        FileFilterTab.ALL -> activeList.size + completedCount + failedCount
                         FileFilterTab.DOWNLOADING -> activeList.size
-                        FileFilterTab.COMPLETED -> historyRecords.count { it.status == DownloadStatus.COMPLETED }
-                        FileFilterTab.FAILED -> historyRecords.count { it.status == DownloadStatus.FAILED }
+                        FileFilterTab.COMPLETED -> completedCount
+                        FileFilterTab.FAILED -> failedCount
                     }
                     Button(
                         onClick = { selectedTab = tab },
@@ -323,18 +335,58 @@ private fun ActiveDownloadCard(
                     Spacer(Modifier.height(6.dp))
                     Row(
                         modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.SpaceBetween
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text("${state.percent}%", style = MaterialTheme.typography.labelSmall, color = TextPrimary)
+                        // Left: Percentage
+                        Text(
+                            "${state.percent}%",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = TextPrimary,
+                            fontWeight = FontWeight.Bold
+                        )
+                        // Middle: Speed
                         Text(
                             if (state.isMerging) "Merging..." else FormatLabels.speedLabel(state.speedKBps * 1024),
+                            style = MaterialTheme.typography.labelSmall,
+                            color = Accent,
+                            fontWeight = FontWeight.Medium
+                        )
+                        // Right: Downloaded Size / Total Size
+                        val sizeText = when {
+                            state.totalBytes > 0 -> "${FormatLabels.formatBytes(state.bytesDownloaded)} / ${FormatLabels.formatBytes(state.totalBytes)}"
+                            state.bytesDownloaded > 0 -> FormatLabels.formatBytes(state.bytesDownloaded)
+                            else -> ""
+                        }
+                        Text(
+                            sizeText,
                             style = MaterialTheme.typography.labelSmall,
                             color = TextSecondary
                         )
                     }
                 }
                 is ServiceState.Paused -> {
-                    Text("Paused (${state.percent}%)", style = MaterialTheme.typography.labelSmall, color = TextMuted)
+                    LinearProgressIndicator(
+                        progress = { state.percent / 100f },
+                        color = TextMuted,
+                        trackColor = Outline,
+                        modifier = Modifier.fillMaxWidth().height(6.dp).clip(RoundedCornerShape(3.dp))
+                    )
+                    Spacer(Modifier.height(6.dp))
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("${state.percent}%", style = MaterialTheme.typography.labelSmall, color = TextMuted, fontWeight = FontWeight.Bold)
+                        Text("Paused", style = MaterialTheme.typography.labelSmall, color = TextMuted)
+                        val sizeText = when {
+                            state.totalBytes > 0 -> "${FormatLabels.formatBytes(state.bytesDownloaded)} / ${FormatLabels.formatBytes(state.totalBytes)}"
+                            state.bytesDownloaded > 0 -> FormatLabels.formatBytes(state.bytesDownloaded)
+                            else -> ""
+                        }
+                        Text(sizeText, style = MaterialTheme.typography.labelSmall, color = TextMuted)
+                    }
                 }
                 is ServiceState.Error -> {
                     Text("Error: ${state.message}", style = MaterialTheme.typography.labelSmall, color = Error)

@@ -326,9 +326,12 @@ class DownloadService : Service() {
         cancelledIds.remove(downloadId)
         downloadJobs.remove(downloadId)
 
-        // Auto-dismiss Success entries after 5 seconds so main screen stays clean
+        // Auto-dismiss finished entries so service map transitions immediately
         if (finalState is ServiceState.Success) {
-            delay(5_000)
+            delay(1_000)
+            _downloads.update { it - downloadId }
+        } else if (finalState is ServiceState.Error) {
+            delay(2_000)
             _downloads.update { it - downloadId }
         }
 

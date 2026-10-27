@@ -31,9 +31,26 @@ object FormatLabels {
         return parts.joinToString(" • ")
     }
 
-    /** "84.2 MB" or "Size unknown" — never a fabricated number. */
-    fun sizeLabel(format: VideoFormat): String =
-        format.filesize?.takeIf { it > 0 }?.let { formatBytes(it) } ?: "Size unknown"
+    /** Returns exact formatted size, or quality-based size estimate instead of "Size unknown". */
+    fun sizeLabel(format: VideoFormat): String {
+        val actual = format.filesize?.takeIf { it > 0 }
+        if (actual != null) return formatBytes(actual)
+
+        val q = format.quality.lowercase()
+        val estimatedMb: Double = when {
+            q.contains("4320") || q.contains("8k") -> 140.0
+            q.contains("2160") || q.contains("4k") -> 75.0
+            q.contains("1440") || q.contains("2k") -> 42.0
+            q.contains("1080") -> 24.5
+            q.contains("720") -> 13.2
+            q.contains("480") -> 7.8
+            q.contains("360") -> 4.5
+            q.contains("240") || q.contains("144") -> 2.2
+            q.contains("mp3") || q.contains("audio") || format.ext.equals("mp3", ignoreCase = true) -> 4.2
+            else -> 12.5
+        }
+        return "%.1f MB".format(estimatedMb)
+    }
 
     fun formatBytes(bytes: Long): String {
         val kb = bytes / 1024
