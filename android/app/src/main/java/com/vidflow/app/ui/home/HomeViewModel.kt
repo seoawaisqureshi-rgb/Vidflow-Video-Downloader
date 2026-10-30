@@ -21,6 +21,8 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 
 data class HomeUiState(
+    val youtubeUrlInput: String = "",
+    val otherUrlInput: String = "",
     val urlInput: String = "",
     val isLoading: Boolean = false,
     val videoInfo: VideoInfo? = null,
@@ -56,9 +58,57 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
 
     private val repository get() = (getApplication<VidFlowApplication>()).repository
 
-    fun onUrlChanged(url: String) {
+    fun onYoutubeUrlChanged(url: String) {
         _uiState.update {
-            it.copy(urlInput = url, error = null, videoInfo = null, selectedFormat = null, loginRequiredPlatform = null)
+            it.copy(
+                youtubeUrlInput = url,
+                // When user types/pastes in YouTube field, auto-clear other platform field
+                otherUrlInput = if (url.isNotBlank()) "" else it.otherUrlInput,
+                urlInput = url,
+                error = null,
+                videoInfo = null,
+                selectedFormat = null,
+                loginRequiredPlatform = null,
+            )
+        }
+    }
+
+    fun onOtherUrlChanged(url: String) {
+        _uiState.update {
+            it.copy(
+                otherUrlInput = url,
+                // When user types/pastes in other platform field, auto-clear YouTube field
+                youtubeUrlInput = if (url.isNotBlank()) "" else it.youtubeUrlInput,
+                urlInput = url,
+                error = null,
+                videoInfo = null,
+                selectedFormat = null,
+                loginRequiredPlatform = null,
+            )
+        }
+    }
+
+    /** Called when the in-app YouTube browser navigates to a new URL */
+    fun onYoutubeBrowserNavigated(url: String) {
+        _uiState.update {
+            it.copy(
+                youtubeUrlInput = url,
+                // Automatically clear second row when navigating YouTube videos so clicking button analyzes this YouTube video
+                otherUrlInput = "",
+                urlInput = url,
+                error = null,
+                videoInfo = null,
+                selectedFormat = null,
+            )
+        }
+    }
+
+    fun onUrlChanged(url: String) {
+        val trimmed = url.trim()
+        if (isYouTubeUrl(trimmed)) {
+            onYoutubeUrlChanged(trimmed)
+        } else {
+            onOtherUrlChanged(trimmed)
         }
     }
 
@@ -66,12 +116,7 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
     fun analyzeUrl(url: String) {
         lastAutoAnalyzedUrl = null
         lastAnalyzedUrl = null
-        _uiState.update {
-            it.copy(
-                urlInput = url, error = null, videoInfo = null,
-                selectedFormat = null, loginRequiredPlatform = null,
-            )
-        }
+        onUrlChanged(url)
         fetchInfo()
     }
 
@@ -129,9 +174,9 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
             }
             return
         }
+        onUrlChanged(url)
         _uiState.update {
             it.copy(
-                urlInput = url,
                 clipboardUrl = null,
                 error = null,
                 videoInfo = null,
@@ -146,11 +191,19 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun fetchInfo() {
-        val url = _uiState.value.urlInput.trim()
+        val current = _uiState.value
+        val url = when {
+            current.otherUrlInput.isNotBlank() -> current.otherUrlInput.trim()
+            current.youtubeUrlInput.isNotBlank() -> current.youtubeUrlInput.trim()
+            current.urlInput.isNotBlank() -> current.urlInput.trim()
+            else -> ""
+        }
         if (url.isBlank()) {
-            _uiState.update { it.copy(error = "Please paste a video URL first.") }
+            _uiState.update { it.copy(error = "Please enter a YouTube link or paste other platform link first.") }
             return
         }
+
+        _uiState.update { it.copy(urlInput = url) }
 
         // Bug 1 fix: If the link is already actively downloading, do not restart analysis!
         if (isUrlCurrentlyDownloading(url)) {
@@ -268,6 +321,11 @@ class HomeViewModel(app: Application) : AndroidViewModel(app) {
             if (raw.isNullOrBlank()) return null
             val match = URL_REGEX.find(raw) ?: return null
             return match.value.trim().trimEnd('.', ',', '!', ';', ')')
+        }
+
+        fun isYouTubeUrl(url: String): Boolean {
+            val lower = url.lowercase().trim()
+            return lower.contains("youtube.com") || lower.contains("youtu.be") || lower.contains("yt.be")
         }
     }
 }

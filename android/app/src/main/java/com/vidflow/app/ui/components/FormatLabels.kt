@@ -31,25 +31,37 @@ object FormatLabels {
         return parts.joinToString(" • ")
     }
 
-    /** Returns exact formatted size, or quality-based size estimate instead of "Size unknown". */
-    fun sizeLabel(format: VideoFormat): String {
+    /** Returns exact formatted size, or duration/quality-based size estimate instead of "Size unknown". */
+    fun sizeLabel(format: VideoFormat, durationSeconds: Long? = null): String {
         val actual = format.filesize?.takeIf { it > 0 }
         if (actual != null) return formatBytes(actual)
 
         val q = format.quality.lowercase()
-        val estimatedMb: Double = when {
-            q.contains("4320") || q.contains("8k") -> 140.0
-            q.contains("2160") || q.contains("4k") -> 75.0
-            q.contains("1440") || q.contains("2k") -> 42.0
-            q.contains("1080") -> 24.5
-            q.contains("720") -> 13.2
-            q.contains("480") -> 7.8
-            q.contains("360") -> 4.5
-            q.contains("240") || q.contains("144") -> 2.2
-            q.contains("mp3") || q.contains("audio") || format.ext.equals("mp3", ignoreCase = true) -> 4.2
-            else -> 12.5
+        val duration = durationSeconds?.takeIf { it > 0 } ?: 240L // Default reference: 4 minutes (240s)
+
+        // Calculate size based on realistic bitrates (Bytes = (bitrate_bps / 8) * duration_seconds)
+        val estimatedBytes: Long = when {
+            // Audio bitrates (CBR)
+            q.contains("320") -> ((320_000L / 8) * duration)
+            q.contains("256") -> ((256_000L / 8) * duration)
+            q.contains("192") -> ((192_000L / 8) * duration)
+            q.contains("128") -> ((128_000L / 8) * duration)
+            q.contains("64")  -> ((64_000L / 8) * duration)
+            q.contains("mp3") || q.contains("audio") || format.ext.equals("mp3", ignoreCase = true) -> ((192_000L / 8) * duration)
+
+            // Video resolutions (Video + Audio combined)
+            q.contains("4320") || q.contains("8k") -> ((40_000_000L / 8) * duration) // ~40 Mbps
+            q.contains("2160") || q.contains("4k") -> ((18_000_000L / 8) * duration) // ~18 Mbps (e.g. 33 min ~ 4.4 GB)
+            q.contains("1440") || q.contains("2k") -> ((10_000_000L / 8) * duration) // ~10 Mbps (e.g. 33 min ~ 2.4 GB)
+            q.contains("1080") -> ((4_000_000L / 8) * duration)                      // ~4 Mbps  (e.g. 33 min ~ 990 MB)
+            q.contains("720")  -> ((1_800_000L / 8) * duration)                      // ~1.8 Mbps(e.g. 33 min ~ 445 MB)
+            q.contains("480")  -> ((750_000L / 8) * duration)                        // ~750 kbps(e.g. 33 min ~ 185 MB)
+            q.contains("360")  -> ((350_000L / 8) * duration)                        // ~350 kbps(e.g. 33 min ~ 86 MB)
+            q.contains("240")  -> ((200_000L / 8) * duration)
+            q.contains("144")  -> ((100_000L / 8) * duration)
+            else -> ((1_500_000L / 8) * duration)
         }
-        return "%.1f MB".format(estimatedMb)
+        return formatBytes(estimatedBytes)
     }
 
     fun formatBytes(bytes: Long): String {

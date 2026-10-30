@@ -6,6 +6,7 @@ import androidx.room.OnConflictStrategy
 import androidx.room.Query
 import androidx.room.Update
 import com.vidflow.app.data.model.DownloadStatus
+import com.vidflow.app.data.model.Platform
 import kotlinx.coroutines.flow.Flow
 
 @Dao
@@ -34,6 +35,9 @@ interface DownloadDao {
 
     @Query("SELECT * FROM download_history WHERE status = 'COMPLETED' ORDER BY completedAt DESC")
     fun getCompletedDownloads(): Flow<List<DownloadRecord>>
+
+    @Query("SELECT * FROM download_history WHERE platform = :platform ORDER BY createdAt DESC")
+    suspend fun getByPlatform(platform: Platform): List<DownloadRecord>
 
     @Query("SELECT * FROM download_history WHERE id = :id")
     suspend fun getById(id: Long): DownloadRecord?

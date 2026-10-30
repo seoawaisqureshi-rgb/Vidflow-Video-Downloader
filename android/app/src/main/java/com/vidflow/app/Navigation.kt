@@ -121,7 +121,11 @@ fun MainNavigation(
 
     if (showFullScreenPlayer) {
         FullScreenVideoPlayerDialog(
-            onDismiss = { showFullScreenPlayer = false }
+            onDismiss = {
+                MediaPlayerManager.stop()
+                MediaPlayerManager.release()
+                showFullScreenPlayer = false
+            }
         )
     }
 }

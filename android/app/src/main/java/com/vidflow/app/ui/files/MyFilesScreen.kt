@@ -3,6 +3,7 @@ package com.vidflow.app.ui.files
 import android.content.Context
 import android.content.Intent
 import android.net.Uri
+import android.text.format.Formatter
 import android.widget.Toast
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
@@ -38,6 +39,10 @@ import com.vidflow.app.ui.components.FormatLabels
 import com.vidflow.app.ui.components.PlatformBadge
 import com.vidflow.app.ui.history.HistoryViewModel
 import com.vidflow.app.ui.player.MediaPlayerManager
+import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 private enum class FileFilterTab(val label: String) {
     ALL("All"),
@@ -66,6 +71,8 @@ fun MyFilesScreen(
     var selectedTab by remember { mutableStateOf(FileFilterTab.ALL) }
     var searchQuery by remember { mutableStateOf("") }
     var showDeleteConfirmDialog by remember { mutableStateOf(false) }
+    var showInAppFolderDialog by remember { mutableStateOf(false) }
+    var showFolderSettingsMenu by remember { mutableStateOf(false) }
 
     val filteredRecords = remember(historyRecords, selectedTab, searchQuery, activeTitles) {
         historyRecords.filter { record ->
@@ -96,18 +103,45 @@ fun MyFilesScreen(
                     )
                 },
                 actions = {
-                    // Folder icon that opens Samsung My Files or user-preferred file manager (Bug 4 fix)
-                    IconButton(onClick = { FileManagerHelper.openFolder(context) }) {
+                    // Green folder icon that opens Samsung My Files / System Files / In-app view (Section 3)
+                    IconButton(onClick = {
+                        val result = FileManagerHelper.openVidFlowFolder(context)
+                        if (result == FileManagerHelper.OpenFolderResult.IN_APP_FALLBACK) {
+                            showInAppFolderDialog = true
+                        }
+                    }) {
                         Icon(
-                            Icons.Rounded.FolderOpen,
-                            contentDescription = "Open Folder",
-                            tint = Accent,
+                            Icons.Rounded.Folder,
+                            contentDescription = "Open VidFlow Folder",
+                            tint = Color(0xFF10B981), // #10B981 bright green
                             modifier = Modifier.size(26.dp)
                         )
                     }
-                    if (historyRecords.isNotEmpty()) {
-                        IconButton(onClick = { showDeleteConfirmDialog = true }) {
-                            Icon(Icons.Rounded.DeleteSweep, contentDescription = "Clear All", tint = TextMuted)
+
+                    Box {
+                        IconButton(onClick = { showFolderSettingsMenu = true }) {
+                            Icon(Icons.Rounded.MoreVert, contentDescription = "Options", tint = TextMuted)
+                        }
+                        DropdownMenu(
+                            expanded = showFolderSettingsMenu,
+                            onDismissRequest = { showFolderSettingsMenu = false }
+                        ) {
+                            DropdownMenuItem(
+                                text = { Text("Browse folder in app") },
+                                onClick = {
+                                    showFolderSettingsMenu = false
+                                    showInAppFolderDialog = true
+                                }
+                            )
+                            if (historyRecords.isNotEmpty()) {
+                                DropdownMenuItem(
+                                    text = { Text("Clear all history", color = Error) },
+                                    onClick = {
+                                        showFolderSettingsMenu = false
+                                        showDeleteConfirmDialog = true
+                                    }
+                                )
+                            }
                         }
                     }
                 },
@@ -260,6 +294,112 @@ fun MyFilesScreen(
             dismissButton = {
                 TextButton(onClick = { showDeleteConfirmDialog = false }) {
                     Text("Cancel")
+                }
+            }
+        )
+    }
+
+    if (showInAppFolderDialog) {
+        val folder = remember { FileManagerHelper.getVidFlowFolder() }
+        val files = remember(showInAppFolderDialog) {
+            folder.listFiles()?.filter { it.isFile }?.sortedByDescending { it.lastModified() } ?: emptyList()
+        }
+        val dateFormat = remember { SimpleDateFormat("MMM d, yyyy HH:mm", Locale.getDefault()) }
+
+        AlertDialog(
+            onDismissRequest = { showInAppFolderDialog = false },
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        Icons.Rounded.Folder,
+                        contentDescription = null,
+                        tint = Color(0xFF10B981),
+                        modifier = Modifier.size(24.dp)
+                    )
+                    Spacer(Modifier.width(8.dp))
+                    Column {
+                        Text("Downloads/VidFlow", fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                        Text("${files.size} files on device", style = MaterialTheme.typography.bodySmall, color = TextSecondary)
+                    }
+                }
+            },
+            text = {
+                if (files.isEmpty()) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(vertical = 24.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text("No files in VidFlow folder yet", color = TextSecondary, fontSize = 14.sp)
+                    }
+                } else {
+                    LazyColumn(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .heightIn(max = 380.dp),
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        items(files, key = { it.absolutePath }) { file ->
+                            val isVideo = file.extension.lowercase() in listOf("mp4", "mkv", "webm", "mov", "avi")
+                            Surface(
+                                color = SurfaceVariant,
+                                shape = RoundedCornerShape(10.dp),
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 10.dp, vertical = 8.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Icon(
+                                        if (isVideo) Icons.Rounded.PlayCircle else Icons.Rounded.Audiotrack,
+                                        contentDescription = null,
+                                        tint = Accent,
+                                        modifier = Modifier.size(28.dp)
+                                    )
+                                    Spacer(Modifier.width(8.dp))
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            file.name,
+                                            style = MaterialTheme.typography.bodySmall,
+                                            fontWeight = FontWeight.SemiBold,
+                                            maxLines = 1,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
+                                        Text(
+                                            "${Formatter.formatFileSize(context, file.length())} • ${dateFormat.format(Date(file.lastModified()))}",
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = TextMuted
+                                        )
+                                    }
+                                    IconButton(
+                                        onClick = {
+                                            onOpenPlayer(file.absolutePath, file.nameWithoutExtension, isVideo)
+                                            showInAppFolderDialog = false
+                                        },
+                                        modifier = Modifier.size(36.dp)
+                                    ) {
+                                        Icon(Icons.Rounded.PlayArrow, contentDescription = "Play", tint = TextPrimary)
+                                    }
+                                    IconButton(
+                                        onClick = {
+                                            shareMediaFile(context, file.absolutePath, file.nameWithoutExtension)
+                                        },
+                                        modifier = Modifier.size(36.dp)
+                                    ) {
+                                        Icon(Icons.Rounded.Share, contentDescription = "Share", tint = TextMuted)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {
+                TextButton(onClick = { showInAppFolderDialog = false }) {
+                    Text("Close", color = Accent)
                 }
             }
         )
@@ -477,10 +617,19 @@ private fun shareMediaFile(context: Context, path: String, title: String) {
         val fileUri = if (path.startsWith("content://")) {
             Uri.parse(path)
         } else {
-            Uri.parse("file://$path")
+            val file = java.io.File(path)
+            if (file.exists()) {
+                androidx.core.content.FileProvider.getUriForFile(
+                    context,
+                    "${context.packageName}.fileprovider",
+                    file
+                )
+            } else {
+                Uri.parse("file://$path")
+            }
         }
         val intent = Intent(Intent.ACTION_SEND).apply {
-            type = if (path.endsWith(".mp3")) "audio/*" else "video/*"
+            type = if (path.endsWith(".mp3") || path.endsWith(".m4a")) "audio/*" else "video/*"
             putExtra(Intent.EXTRA_STREAM, fileUri)
             putExtra(Intent.EXTRA_TEXT, title)
             addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)

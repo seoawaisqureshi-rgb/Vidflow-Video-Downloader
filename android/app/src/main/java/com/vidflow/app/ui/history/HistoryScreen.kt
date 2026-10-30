@@ -144,6 +144,16 @@ private fun HistoryItem(
                     PlatformBadge(record.platform.displayName)
                     StatusChip(record.status)
                 }
+                if (record.status == DownloadStatus.FAILED && !record.errorMessage.isNullOrBlank()) {
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        record.errorMessage!!,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = Error,
+                        maxLines = 4,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
                 if (record.status == DownloadStatus.DOWNLOADING) {
                     Spacer(Modifier.height(6.dp))
                     DownloadProgressBar(

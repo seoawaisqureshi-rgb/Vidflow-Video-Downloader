@@ -230,6 +230,11 @@ class DownloadRepository(context: Context) {
         var lastPct = -1
         var totalBytesParsed = -1L
         var merging = false
+        // Rolling tail of yt-dlp's own output lines. yt-dlp prints the REAL
+        // failure reason here (e.g. "Sign in to confirm you're not a bot"),
+        // while the thrown exception message is usually generic. Kept so the
+        // failure message can show the actual cause instead of hiding it.
+        val recentLines = ArrayDeque<String>()
         // Single-path multi-file downloads: yt-dlp reports EACH file's
         // progress 0..100, so the bar used to jump back to 0 when the
         // second file started. Track file phases and map them onto one
@@ -240,6 +245,10 @@ class DownloadRepository(context: Context) {
         var phase = 0
         try {
             YoutubeDL.getInstance().execute(request, processId) { progress, _, line ->
+                if (line != null) {
+                    recentLines.addLast(line)
+                    if (recentLines.size > 40) recentLines.removeFirst()
+                }
                 if (line != null && (line.contains("[Merger]") || line.contains("Merging formats"))) {
                     merging = true
                 }
@@ -286,7 +295,11 @@ class DownloadRepository(context: Context) {
             if (YtDlpJobs.isCancelled(downloadId)) return YtDlpOutcome.Cancelled
             if (YtDlpJobs.isPaused(downloadId)) return YtDlpOutcome.Paused
             Log.w("VidFlow/YtDlp", "execute failed: ${e.message}")
-            return YtDlpOutcome.Failed("yt-dlp failed: ${e.message?.take(120)}")
+            val errHint = recentLines.filter { "ERROR" in it }.takeLast(3)
+                .joinToString("\n").take(300)
+            val detail = "yt-dlp failed: ${e.message?.take(120)}" +
+                (if (errHint.isNotBlank()) "\n$errHint" else "")
+            return YtDlpOutcome.Failed(detail)
         } finally {
             YtDlpJobs.unregister(downloadId, processId)
         }
@@ -310,6 +323,14 @@ class DownloadRepository(context: Context) {
         // Parallel fragments: the single biggest download-speed win for
         // fragmented (DASH/HLS) streams, the way fast downloader apps work.
         addOption("--concurrent-fragments", "4")
+        // YouTube only: pin yt-dlp to the ANDROID player client. In 2026 the
+        // default client chain serves SABR / PO-token-gated streams that fail
+        // anonymously; the ANDROID client still serves plain streams without a
+        // PO token (required=False in yt-dlp). Matches the extractor's own
+        // ANDROID-first strategy. Other platforms are untouched.
+        if (info.platform == Platform.YOUTUBE) {
+            addOption("--extractor-args", "youtube:player_client=android")
+        }
         SessionCookies.writeCookiesTxt(appContext, info.platform)?.let { cookies ->
             addOption("--cookies", cookies.absolutePath)
         }
@@ -455,7 +476,11 @@ class DownloadRepository(context: Context) {
         onProgress: suspend (DownloadProgress) -> Unit,
     ): DownloadResult? = withContext(Dispatchers.IO) {
         val height = Regex("""(\d{3,4})p""").find(format.quality)?.groupValues?.get(1)?.toIntOrNull()
-        val videoSelector = if (height != null) "bestvideo[height<=$height]/bestvideo" else "bestvideo"
+        val videoSelector = if (height != null) {
+            "bestvideo[height=$height]/bestvideo[height<=$height]/bestvideo"
+        } else {
+            "bestvideo"
+        }
         val audioSelector = "bestaudio/best"
         val videoTemplate = "${outputTemplate}_v"
         val audioTemplate = "${outputTemplate}_a"
@@ -527,37 +552,21 @@ class DownloadRepository(context: Context) {
         DownloadResult.Success(finalPath, fileSize)
     }
 
-    /** Saves a file to Music/VidFlow/ (for audio) or Downloads/VidFlow/ (for video) via scoped storage or legacy path. */
+    /** Saves a file to Downloads/VidFlow/ (all videos and MP3 audios) via scoped storage or legacy path. */
     private fun saveToDownloads(src: File, fileName: String, mimeType: String): String {
         return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            val isAudio = mimeType.startsWith("audio/")
-            val targetDir = if (isAudio) "${Environment.DIRECTORY_MUSIC}/VidFlow" else "${Environment.DIRECTORY_DOWNLOADS}/VidFlow"
+            val targetDir = "${Environment.DIRECTORY_DOWNLOADS}/VidFlow"
             val cv = ContentValues().apply {
                 put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
                 put(MediaStore.MediaColumns.MIME_TYPE, mimeType)
                 put(MediaStore.MediaColumns.RELATIVE_PATH, targetDir)
                 put(MediaStore.MediaColumns.IS_PENDING, 1)
             }
-            val collectionUri = if (isAudio) {
-                MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
-            } else {
-                MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
-            }
+            val collectionUri = MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
 
             try {
                 val uri = appContext.contentResolver.insert(collectionUri, cv)
-                    ?: run {
-                        // Fallback to MediaStore.Downloads for audio if Audio.Media returned null
-                        val fallbackCv = ContentValues().apply {
-                            put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
-                            put(MediaStore.MediaColumns.MIME_TYPE, mimeType)
-                            put(MediaStore.MediaColumns.RELATIVE_PATH, "${Environment.DIRECTORY_DOWNLOADS}/VidFlow")
-                            put(MediaStore.MediaColumns.IS_PENDING, 1)
-                        }
-                        appContext.contentResolver.insert(
-                            MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY), fallbackCv
-                        ) ?: error("MediaStore insert returned null for $fileName")
-                    }
+                    ?: error("MediaStore insert returned null for $fileName")
 
                 appContext.contentResolver.openOutputStream(uri)?.use { out ->
                     src.inputStream().use { it.copyTo(out) }
@@ -567,13 +576,11 @@ class DownloadRepository(context: Context) {
                 )
                 uri.toString()
             } catch (e: Exception) {
-                // Secondary fallback: save to public Downloads/VidFlow or app files dir
+                // Secondary fallback: save to public Downloads/VidFlow
                 Log.e("VidFlow/Storage", "Scoped storage save failed: ${e.message}, falling back to legacy", e)
                 @Suppress("DEPRECATION")
                 val fallbackFolder = File(
-                    Environment.getExternalStoragePublicDirectory(
-                        if (isAudio) Environment.DIRECTORY_MUSIC else Environment.DIRECTORY_DOWNLOADS
-                    ), "VidFlow"
+                    Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "VidFlow"
                 )
                 fallbackFolder.mkdirs()
                 val dest = File(fallbackFolder, fileName)
@@ -581,12 +588,9 @@ class DownloadRepository(context: Context) {
                 dest.absolutePath
             }
         } else {
-            val isAudio = mimeType.startsWith("audio/")
             @Suppress("DEPRECATION")
             val dir = File(
-                Environment.getExternalStoragePublicDirectory(
-                    if (isAudio) Environment.DIRECTORY_MUSIC else Environment.DIRECTORY_DOWNLOADS
-                ), "VidFlow",
+                Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "VidFlow",
             )
             dir.mkdirs()
             val dest = File(dir, fileName)

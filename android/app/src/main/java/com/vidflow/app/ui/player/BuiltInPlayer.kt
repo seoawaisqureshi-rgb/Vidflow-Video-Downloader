@@ -67,6 +67,8 @@ object MediaPlayerManager {
 
     fun play(context: Context, uri: String, title: String, isVideo: Boolean = true) {
         try {
+            // Stop and release previous session cleanly before starting a new one
+            stop()
             val player = getPlayer(context)
             val mediaUri = when {
                 uri.startsWith("content://") || uri.startsWith("http://") || uri.startsWith("https://") -> Uri.parse(uri)
@@ -97,12 +99,18 @@ object MediaPlayerManager {
     }
 
     fun stop() {
-        exoPlayer?.stop()
-        _playbackState.value = PlaybackState(isVisible = false, isPlaying = false)
+        try {
+            exoPlayer?.stop()
+        } catch (_: Exception) {}
+        _playbackState.value = _playbackState.value.copy(isPlaying = false)
     }
 
     fun release() {
-        exoPlayer?.release()
+        try {
+            exoPlayer?.stop()
+            exoPlayer?.clearMediaItems()
+            exoPlayer?.release()
+        } catch (_: Exception) {}
         exoPlayer = null
         _playbackState.value = PlaybackState(isVisible = false, isPlaying = false)
     }
@@ -176,7 +184,10 @@ fun MiniPlayerBar(
                 )
             }
 
-            IconButton(onClick = { MediaPlayerManager.stop() }) {
+            IconButton(onClick = {
+                MediaPlayerManager.stop()
+                MediaPlayerManager.release()
+            }) {
                 Icon(
                     Icons.Rounded.Close,
                     contentDescription = "Close",
@@ -189,7 +200,9 @@ fun MiniPlayerBar(
 }
 
 /**
- * Fullscreen or Dialog Video Player
+ * Fullscreen or Dialog Video Player:
+ * Stopping and releasing player on X button, back dismiss, and onDispose
+ * guarantees no background audio survives dismissal.
  */
 @OptIn(UnstableApi::class)
 @Composable
@@ -200,8 +213,21 @@ fun FullScreenVideoPlayerDialog(
     val state by MediaPlayerManager.playbackState.collectAsState()
     val player = remember { MediaPlayerManager.getPlayer(context) }
 
+    val handleDismiss = {
+        MediaPlayerManager.stop()
+        MediaPlayerManager.release()
+        onDismiss()
+    }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            MediaPlayerManager.stop()
+            MediaPlayerManager.release()
+        }
+    }
+
     Dialog(
-        onDismissRequest = onDismiss,
+        onDismissRequest = handleDismiss,
         properties = DialogProperties(usePlatformDefaultWidth = false)
     ) {
         Box(
@@ -240,7 +266,7 @@ fun FullScreenVideoPlayerDialog(
                     modifier = Modifier.weight(1f)
                 )
                 IconButton(
-                    onClick = onDismiss,
+                    onClick = handleDismiss,
                     modifier = Modifier
                         .size(36.dp)
                         .clip(CircleShape)

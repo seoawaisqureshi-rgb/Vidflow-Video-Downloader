@@ -270,7 +270,7 @@ class DownloadService : Service() {
             return
         }
 
-        // Show 100% briefly before switching to result state
+        // Capture last known progress state before branching (used by both Success 100% flash and Paused)
         val last = _downloads.value[downloadId]?.state
         val lastBytes = (last as? ServiceState.Downloading)?.bytesDownloaded
             ?: (last as? ServiceState.Paused)?.bytesDownloaded
@@ -278,14 +278,18 @@ class DownloadService : Service() {
         val lastTotal = (last as? ServiceState.Downloading)?.totalBytes
             ?: (last as? ServiceState.Paused)?.totalBytes
             ?: -1L
-        _downloads.update { current ->
-            current + (downloadId to DownloadEntry(
-                downloadId,
-                request.info.title,
-                ServiceState.Downloading(100, 0, lastBytes, if (lastTotal > 0) lastTotal else lastBytes),
-            ))
+
+        // Show 100% briefly ONLY for successful downloads
+        if (result is DownloadResult.Success) {
+            _downloads.update { current ->
+                current + (downloadId to DownloadEntry(
+                    downloadId,
+                    request.info.title,
+                    ServiceState.Downloading(100, 0, lastBytes, if (lastTotal > 0) lastTotal else lastBytes),
+                ))
+            }
+            delay(300)
         }
-        delay(300)
 
         val finalState = when (result) {
             is DownloadResult.Success -> {

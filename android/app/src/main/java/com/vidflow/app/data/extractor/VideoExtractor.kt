@@ -139,27 +139,26 @@ class VideoExtractor(
         if (!isStory) {
             val shortcode = url.regexFind("""/(?:p|reel|reels|tv|share/reel|share/p)/([A-Za-z0-9_-]+)""", 1)
             val result = orderedChain(url, Platform.INSTAGRAM) {
-                InstagramExtractor(client).extract(url)
-                    .takeIf { it is Result.Success }
-                    ?: (shortcode?.let { tryInstagramAppApi(url, it) })
+                (shortcode?.let { tryInstagramAppApi(url, it) })
+                    ?.takeIf { it is Result.Success }
                     ?: (shortcode?.let { tryInstagramEmbed(url, it) })
-                    ?: Result.Error("Could not extract this Instagram post.")
+                        ?.takeIf { it is Result.Success }
+                    ?: InstagramExtractor(client).extract(url)
+                        .takeIf { it is Result.Success }
+                    ?: Result.Error("Could not extract video from this Instagram post.")
             }
             if (result is Result.Success) return result
-            if (!SessionCookies.hasSession(Platform.INSTAGRAM)) {
-                return Result.LoginRequired(
-                    Platform.INSTAGRAM, SessionCookies.loginRequiredMessage(Platform.INSTAGRAM),
+            if (SessionCookies.hasSession(Platform.INSTAGRAM)) {
+                val igMessage = (result as? Result.Error)?.message
+                    ?: "Could not extract this Instagram post."
+                return Result.Error(
+                    "$igMessage\n\nYour Instagram session may have expired — log " +
+                        "out and back in on the Login tab, then try again.",
                 )
             }
-            // Session exists but every route failed: the likeliest cause
-            // is a stale/rotated session, not a missing video. The old
-            // bare "could not extract" message sent users retrying a dead
-            // link instead of re-logging in.
-            val igMessage = (result as? Result.Error)?.message
-                ?: "Could not extract this Instagram post."
             return Result.Error(
-                "$igMessage\n\nYour Instagram session may have expired — log " +
-                    "out and back in on the Login tab, then try again.",
+                "Could not extract video from this Instagram post.\n\n" +
+                "Verify the post is public, or log in via the Login tab if it is private or age-restricted."
             )
         }
         // Stories: same chain, with the WebView session attached (brief 2.3).
@@ -200,25 +199,51 @@ class VideoExtractor(
 
                 val videoVersions = item?.optJSONArray("video_versions")
                 if (videoVersions != null && videoVersions.length() > 0) {
-                    val videoUrl = videoVersions.getJSONObject(0).optString("url")
                     val thumb = item.optJSONObject("image_versions2")
                         ?.optJSONArray("candidates")?.optJSONObject(0)?.optString("url")
                     val caption = item.optJSONObject("caption")?.optString("text")?.take(60)
 
-                    return Result.Success(VideoInfo(
-                        url = url,
-                        title = caption?.ifEmpty { "Instagram Video" } ?: "Instagram Video",
-                        thumbnail = thumb,
-                        duration = item.optLong("video_duration").takeIf { it > 0 },
-                        uploader = item.optJSONObject("user")?.optString("username"),
-                        platform = Platform.INSTAGRAM,
-                        formats = listOf(VideoFormat(
-                            formatId = "best", quality = "Best Quality", ext = "mp4",
-                            filesize = null, fps = item.optInt("video_codec_fps").takeIf { it > 0 },
-                            vcodec = "h264", acodec = "aac",
-                            hasVideo = true, hasAudio = true, downloadUrl = videoUrl,
-                        )),
-                    ))
+                    val formats = mutableListOf<VideoFormat>()
+                    val seenQuality = mutableSetOf<String>()
+
+                    for (i in 0 until videoVersions.length()) {
+                        val v = videoVersions.getJSONObject(i)
+                        val vUrl = v.optString("url").takeIf { it.isNotEmpty() } ?: continue
+                        val width = v.optInt("width", 0)
+                        val height = v.optInt("height", 0)
+                        val qualityLabel = when {
+                            height >= 1080 || width >= 1080 -> "1080p HD"
+                            height >= 720 || width >= 720 -> "720p HD"
+                            height >= 480 || width >= 480 -> "480p"
+                            height > 0 -> "${height}p"
+                            else -> if (i == 0) "HD" else "SD"
+                        }
+                        if (seenQuality.add(qualityLabel)) {
+                            formats.add(VideoFormat(
+                                formatId = if (i == 0) "hd" else "sd_$i",
+                                quality = qualityLabel,
+                                ext = "mp4",
+                                filesize = null,
+                                fps = item.optInt("video_codec_fps").takeIf { it > 0 } ?: 30,
+                                vcodec = "h264", acodec = "aac",
+                                hasVideo = true, hasAudio = true,
+                                downloadUrl = vUrl,
+                                needsYtDlp = false,
+                            ))
+                        }
+                    }
+
+                    if (formats.isNotEmpty()) {
+                        return Result.Success(VideoInfo(
+                            url = url,
+                            title = caption?.ifEmpty { "Instagram Video" } ?: "Instagram Video",
+                            thumbnail = thumb,
+                            duration = item.optLong("video_duration").takeIf { it > 0 },
+                            uploader = item.optJSONObject("user")?.optString("username"),
+                            platform = Platform.INSTAGRAM,
+                            formats = formats,
+                        ))
+                    }
                 }
             }
             null
@@ -317,9 +342,17 @@ class VideoExtractor(
         val formats = mutableListOf<VideoFormat>()
 
         if (bestUrl != null) {
+            val h = bestCombined?.height ?: 0
+            val qualityLabel = when {
+                h >= 1080 -> "1080p HD"
+                h >= 720 -> "720p HD"
+                h >= 480 -> "480p"
+                h > 0 -> "${h}p"
+                else -> "HD"
+            }
             // Direct URL — no need for yt-dlp at download time
             formats.add(VideoFormat(
-                formatId = "best", quality = "Best Quality",
+                formatId = "best", quality = qualityLabel,
                 ext = "mp4", filesize = null, fps = 30,
                 vcodec = "h264", acodec = "aac",
                 hasVideo = true, hasAudio = true,
@@ -328,7 +361,7 @@ class VideoExtractor(
         } else {
             // DASH streams — use yt-dlp with 'best' selector at download time
             formats.add(VideoFormat(
-                formatId = "best", quality = "Best Quality",
+                formatId = "best", quality = "HD",
                 ext = "mp4", filesize = null, fps = 30,
                 vcodec = "h264", acodec = "aac",
                 hasVideo = true, hasAudio = true,

@@ -51,6 +51,15 @@ class DownloadEngine(
      *
      * Unchanged on purpose: 32KB buffer, 250ms progress interval.
      */
+    private fun sanitizeFileName(title: String): String {
+        return title
+            .replace(Regex("""[\r\n\t\u0000-\u001f\\/:*?"<>|]"""), " ")
+            .replace(Regex("""\s+"""), " ")
+            .trim(' ', '.', '_', '-')
+            .take(60)
+            .ifEmpty { "video" }
+    }
+
     suspend fun download(
         info: VideoInfo,
         format: VideoFormat,
@@ -59,9 +68,7 @@ class DownloadEngine(
         onProgress: suspend (DownloadProgress) -> Unit,
     ): DownloadResult = withContext(Dispatchers.IO) {
 
-        val safeTitle = info.title
-            .replace(Regex("[\\\\/:*?\"<>|]"), "_")
-            .take(80).trim().ifEmpty { "video" }
+        val safeTitle = sanitizeFileName(info.title)
         val fileName = "${safeTitle}.${format.ext}"
 
         val partFile = partFileFor(downloadId, fileName)
@@ -190,7 +197,13 @@ class DownloadEngine(
             }
 
             val finalPath = publishFinishedFile(partFile, fileName, mimeType, isAudioOnly)
-                ?: return@withContext DownloadResult.Error("Could not save file. Check storage permissions.")
+            if (finalPath == null) {
+                // Don't delete the part file: leave it for retry.
+                val partSize = if (partFile.exists()) partFile.length() else -1L
+                return@withContext DownloadResult.Error(
+                    "Could not save file to Downloads. Part size: ${partSize / 1024}KB. Check storage space and permissions."
+                )
+            }
             DownloadResult.Success(finalPath, bytesDownloaded)
         } catch (e: kotlinx.coroutines.CancellationException) {
             runCatching { partFile.delete() }
@@ -227,59 +240,57 @@ class DownloadEngine(
         mimeType: String,
         isAudioOnly: Boolean,
     ): String? {
-        if (!partFile.exists()) return null
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+        if (!partFile.exists() || partFile.length() == 0L) return null
+
+        val nameWithoutExt = fileName.substringBeforeLast(".")
+        val ext = fileName.substringAfterLast(".", "mp4")
+        val cleanName = "${sanitizeFileName(nameWithoutExt)}.$ext"
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            val targetDir = "${Environment.DIRECTORY_DOWNLOADS}/VidFlow"
+            val cv = ContentValues().apply {
+                put(MediaStore.MediaColumns.DISPLAY_NAME, cleanName)
+                put(MediaStore.MediaColumns.MIME_TYPE, mimeType)
+                put(MediaStore.MediaColumns.RELATIVE_PATH, targetDir)
+                put(MediaStore.MediaColumns.IS_PENDING, 1)
+            }
+            val collectionUri = MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
+            var insertedUri: android.net.Uri? = null
+            try {
+                insertedUri = context.contentResolver.insert(collectionUri, cv)
+                if (insertedUri != null) {
+                    context.contentResolver.openOutputStream(insertedUri)?.use { out ->
+                        partFile.inputStream().buffered(65536).use { inp -> inp.copyTo(out, 65536) }
+                    }
+                    val updateCv = ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }
+                    context.contentResolver.update(insertedUri, updateCv, null, null)
+                    runCatching { partFile.delete() }
+                    return insertedUri.toString()
+                }
+            } catch (e: Exception) {
+                android.util.Log.e("VidFlow/Publish", "MediaStore save failed: ${e.message}", e)
+                if (insertedUri != null) {
+                    runCatching { context.contentResolver.delete(insertedUri, null, null) }
+                }
+            }
+        }
+
+        // Direct filesystem fallback (pre-Q or if MediaStore insert failed)
+        return try {
             @Suppress("DEPRECATION")
             val dir = File(
                 Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
-                "VidFlow",
+                "VidFlow"
             )
             dir.mkdirs()
-            val dest = File(dir, fileName)
+            val dest = File(dir, cleanName)
             if (dest.exists()) dest.delete()
-            return if (partFile.renameTo(dest)) dest.absolutePath else null
-        }
-        val targetDir = if (isAudioOnly) "${Environment.DIRECTORY_MUSIC}/VidFlow" else "${Environment.DIRECTORY_DOWNLOADS}/VidFlow"
-        val cv = ContentValues().apply {
-            put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
-            put(MediaStore.MediaColumns.MIME_TYPE, mimeType)
-            put(MediaStore.MediaColumns.RELATIVE_PATH, targetDir)
-            put(MediaStore.MediaColumns.IS_PENDING, 1)
-        }
-        val collectionUri = if (isAudioOnly) {
-            MediaStore.Audio.Media.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
-        } else {
-            MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY)
-        }
-        val uri = try {
-            context.contentResolver.insert(collectionUri, cv) ?: run {
-                val fallbackCv = ContentValues().apply {
-                    put(MediaStore.MediaColumns.DISPLAY_NAME, fileName)
-                    put(MediaStore.MediaColumns.MIME_TYPE, mimeType)
-                    put(MediaStore.MediaColumns.RELATIVE_PATH, "${Environment.DIRECTORY_DOWNLOADS}/VidFlow")
-                    put(MediaStore.MediaColumns.IS_PENDING, 1)
-                }
-                context.contentResolver.insert(MediaStore.Downloads.getContentUri(MediaStore.VOLUME_EXTERNAL_PRIMARY), fallbackCv)
-            }
-        } catch (_: Exception) {
+            partFile.copyTo(dest, overwrite = true)
+            runCatching { partFile.delete() }
+            dest.absolutePath
+        } catch (e: Exception) {
+            android.util.Log.e("VidFlow/Publish", "Direct file save failed: ${e.message}", e)
             null
-        } ?: return null
-
-        try {
-            context.contentResolver.openOutputStream(uri)?.use { out ->
-                partFile.inputStream().use { it.copyTo(out) }
-            } ?: run {
-                context.contentResolver.delete(uri, null, null)
-                return null
-            }
-            context.contentResolver.update(
-                uri, ContentValues().apply { put(MediaStore.MediaColumns.IS_PENDING, 0) }, null, null,
-            )
-        } catch (_: Exception) {
-            runCatching { context.contentResolver.delete(uri, null, null) }
-            return null
         }
-        runCatching { partFile.delete() }
-        return uri.toString()
     }
 }

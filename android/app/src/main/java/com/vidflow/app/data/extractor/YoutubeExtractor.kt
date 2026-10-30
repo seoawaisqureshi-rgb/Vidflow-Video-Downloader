@@ -48,10 +48,21 @@ internal class YoutubeExtractor(
      * 3. DownloadRepository handles on-demand execution via yt-dlp DASH merging.
      */
     suspend fun extract(url: String): VideoExtractor.Result = withContext(Dispatchers.IO) {
-        val innerTubeResult = runBlockingWithTimeout(3_500L) {
-            tryInnerTube(
-                url, "WEB", "2.20240901.01.00",
-                "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36",
+        val innerTubeResult = runBlockingWithTimeout(6_000L) {
+            // ANDROID first: the reliable anonymous client in 2026. It does not
+            // need a PO token and still serves plain (non-SABR) stream URLs for
+            // most videos. WEB second as fallback. (Previously only one outdated
+            // WEB client was tried, so every download fell through to yt-dlp.)
+            val android = tryInnerTube(
+                url, "ANDROID", "20.10.38",
+                "com.google.android.youtube/20.10.38 (Linux; U; Android 14; SM-S928B Build/UP1A.231005.007; en_US)",
+            )
+            val androidOk = android is VideoExtractor.Result.Success &&
+                android.info.formats.any { it.downloadUrl.isNotBlank() }
+            if (androidOk) android
+            else tryInnerTube(
+                url, "WEB", "2.20251001.01.00",
+                "Mozilla/5.0 (Linux; Android 14; Mobile) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36",
             )
         }
         if (innerTubeResult is VideoExtractor.Result.Success && innerTubeResult.info.formats.isNotEmpty()) {

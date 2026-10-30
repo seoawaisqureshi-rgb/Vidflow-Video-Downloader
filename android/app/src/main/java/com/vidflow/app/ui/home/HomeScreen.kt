@@ -133,37 +133,10 @@ fun HomeScreen(
         }
     }
 
-    // Handle extraction error: if direct stream was intercepted, offer direct download fallback!
+    // Handle extraction error: show actual error, never synthesize YouTube fallback from background browser
     LaunchedEffect(state.error) {
         val err = state.error ?: return@LaunchedEffect
-        val liveUrl = webViewRef?.url?.takeIf { it.isNotBlank() } ?: currentBrowserUrl
-        if (!interceptedMediaUrl.isNullOrBlank()) {
-            fallbackVideoInfo = VideoInfo(
-                url = liveUrl,
-                title = currentBrowserTitle.ifBlank { "Detected Video" },
-                thumbnail = null,
-                duration = null,
-                uploader = null,
-                platform = Platform.fromUrl(liveUrl),
-                formats = listOf(
-                    VideoFormat(
-                        formatId = "direct_mp4",
-                        quality = "HD Video (Direct MP4)",
-                        ext = "mp4",
-                        filesize = null,
-                        fps = 30,
-                        vcodec = "h264",
-                        acodec = "aac",
-                        hasVideo = true,
-                        hasAudio = true,
-                        downloadUrl = interceptedMediaUrl!!,
-                    )
-                ),
-            )
-            showQualityPickerDialog = true
-        } else {
-            Toast.makeText(context, err, Toast.LENGTH_LONG).show()
-        }
+        Toast.makeText(context, err, Toast.LENGTH_LONG).show()
         viewModel.dismissError()
     }
 
@@ -194,31 +167,34 @@ fun HomeScreen(
                 modifier = Modifier.fillMaxWidth()
             ) {
                 Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 6.dp)) {
-                    // Search or URL Input Bar
+                    // 1. YouTube Dedicated URL Bar (Fixed for YouTube browsing & direct links)
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         OutlinedTextField(
-                            value = state.urlInput,
-                            onValueChange = viewModel::onUrlChanged,
-                            placeholder = { Text("Search YouTube or paste any link...", color = TextMuted, fontSize = 13.sp) },
+                            value = state.youtubeUrlInput,
+                            onValueChange = viewModel::onYoutubeUrlChanged,
+                            placeholder = { Text("YouTube link or search video...", color = TextMuted, fontSize = 13.sp) },
                             leadingIcon = {
-                                Icon(Icons.Rounded.Search, contentDescription = null, tint = Accent)
+                                Icon(Icons.Rounded.PlayArrow, contentDescription = "YouTube", tint = Color(0xFFFF0000))
                             },
                             trailingIcon = {
                                 Row(verticalAlignment = Alignment.CenterVertically) {
-                                    if (state.urlInput.isNotEmpty()) {
-                                        IconButton(onClick = { viewModel.onUrlChanged("") }) {
+                                    if (state.youtubeUrlInput.isNotEmpty()) {
+                                        IconButton(onClick = { viewModel.onYoutubeUrlChanged("") }) {
                                             Icon(Icons.Rounded.Close, contentDescription = "Clear", tint = TextMuted)
                                         }
                                     }
                                     IconButton(onClick = {
                                         val clean = HomeViewModel.extractHttpUrl(clipboard.getText()?.text)
                                         if (!clean.isNullOrBlank()) {
-                                            viewModel.onUrlChanged(clean)
+                                            if (HomeViewModel.isYouTubeUrl(clean)) {
+                                                viewModel.onYoutubeUrlChanged(clean)
+                                            } else {
+                                                viewModel.onOtherUrlChanged(clean)
+                                            }
                                             keyboard?.hide()
-                                            viewModel.fetchInfo()
                                         } else {
                                             Toast.makeText(context, "No URL in clipboard", Toast.LENGTH_SHORT).show()
                                         }
@@ -228,7 +204,59 @@ fun HomeScreen(
                                 }
                             },
                             singleLine = true,
-                            shape = RoundedCornerShape(24.dp),
+                            shape = RoundedCornerShape(20.dp),
+                            colors = OutlinedTextFieldDefaults.colors(
+                                focusedBorderColor = Color(0xFFFF0000),
+                                unfocusedBorderColor = Outline,
+                                focusedContainerColor = Background,
+                                unfocusedContainerColor = Background,
+                            ),
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(46.dp)
+                        )
+                    }
+
+                    Spacer(Modifier.height(6.dp))
+
+                    // 2. Other Platforms Link Bar (Facebook, Instagram, TikTok, X, Pinterest, etc.)
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        OutlinedTextField(
+                            value = state.otherUrlInput,
+                            onValueChange = viewModel::onOtherUrlChanged,
+                            placeholder = { Text("Paste other platform link (FB, IG, TikTok, X...)", color = TextMuted, fontSize = 13.sp) },
+                            leadingIcon = {
+                                Icon(Icons.Rounded.Link, contentDescription = "Other Platforms", tint = Accent)
+                            },
+                            trailingIcon = {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    if (state.otherUrlInput.isNotEmpty()) {
+                                        IconButton(onClick = { viewModel.onOtherUrlChanged("") }) {
+                                            Icon(Icons.Rounded.Close, contentDescription = "Clear", tint = TextMuted)
+                                        }
+                                    }
+                                    IconButton(onClick = {
+                                        val clean = HomeViewModel.extractHttpUrl(clipboard.getText()?.text)
+                                        if (!clean.isNullOrBlank()) {
+                                            if (HomeViewModel.isYouTubeUrl(clean)) {
+                                                viewModel.onYoutubeUrlChanged(clean)
+                                            } else {
+                                                viewModel.onOtherUrlChanged(clean)
+                                            }
+                                            keyboard?.hide()
+                                        } else {
+                                            Toast.makeText(context, "No URL in clipboard", Toast.LENGTH_SHORT).show()
+                                        }
+                                    }) {
+                                        Icon(Icons.Rounded.ContentPaste, contentDescription = "Paste", tint = Accent)
+                                    }
+                                }
+                            },
+                            singleLine = true,
+                            shape = RoundedCornerShape(20.dp),
                             colors = OutlinedTextFieldDefaults.colors(
                                 focusedBorderColor = Accent,
                                 unfocusedBorderColor = Outline,
@@ -236,35 +264,51 @@ fun HomeScreen(
                                 unfocusedContainerColor = Background,
                             ),
                             modifier = Modifier
-                                .weight(1f)
-                                .height(48.dp)
+                                .fillMaxWidth()
+                                .height(46.dp)
                         )
-                        Spacer(Modifier.width(8.dp))
-                        Button(
-                            onClick = {
-                                keyboard?.hide()
-                                val input = state.urlInput.trim()
-                                if (input.startsWith("http://") || input.startsWith("https://")) {
-                                    val lower = input.lowercase()
-                                    if (lower.contains("youtube.com") || lower.contains("youtu.be")) {
-                                        requestedBrowserUrl = input
-                                        currentBrowserUrl = input
-                                    }
+                    }
+
+                    Spacer(Modifier.height(6.dp))
+
+                    // 3. Single Unified Process Button ("Analyze & Download Options")
+                    Button(
+                        onClick = {
+                            keyboard?.hide()
+                            val yt = state.youtubeUrlInput.trim()
+                            val other = state.otherUrlInput.trim()
+
+                            if (other.isNotBlank()) {
+                                viewModel.fetchInfo()
+                            } else if (yt.isNotBlank()) {
+                                if (yt.startsWith("http://") || yt.startsWith("https://")) {
+                                    requestedBrowserUrl = yt
+                                    currentBrowserUrl = yt
                                     viewModel.fetchInfo()
-                                } else if (input.isNotBlank()) {
+                                } else {
                                     val searchUrl = "https://m.youtube.com/results?search_query=" +
-                                        URLEncoder.encode(input, "UTF-8")
+                                        URLEncoder.encode(yt, "UTF-8")
                                     requestedBrowserUrl = searchUrl
                                     currentBrowserUrl = searchUrl
                                 }
-                            },
-                            colors = ButtonDefaults.buttonColors(containerColor = Accent, contentColor = Background),
-                            shape = RoundedCornerShape(20.dp),
-                            contentPadding = PaddingValues(horizontal = 14.dp),
-                            modifier = Modifier.height(44.dp)
-                        ) {
-                            Text("Go", fontWeight = FontWeight.Bold)
-                        }
+                            } else {
+                                Toast.makeText(context, "Please enter a YouTube link or paste other platform link", Toast.LENGTH_SHORT).show()
+                            }
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = Accent, contentColor = Background),
+                        shape = RoundedCornerShape(16.dp),
+                        contentPadding = PaddingValues(horizontal = 14.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(40.dp)
+                    ) {
+                        Icon(Icons.Rounded.Download, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            if (state.isLoading) "Analyzing Video..." else "Analyze & Download Options",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 13.sp
+                        )
                     }
 
                     Spacer(Modifier.height(8.dp))
@@ -485,6 +529,11 @@ fun HomeScreen(
                                         ) {
                                             detectedVideoOnPage = url
                                         }
+                                        if (lower.contains("youtube.com") || lower.contains("youtu.be")) {
+                                            if (lower.contains("watch?v=") || lower.contains("/shorts/")) {
+                                                viewModel.onYoutubeBrowserNavigated(url)
+                                            }
+                                        }
                                     }
                                 }
 
@@ -511,11 +560,11 @@ fun HomeScreen(
                                     }
 
                                     // The in-app browser is dedicated exclusively to YouTube.
-                                    // Social platforms (Facebook, Instagram, TikTok, Pinterest, Threads, Dailymotion)
+                                    // Social platforms (Facebook, Instagram, TikTok, Pinterest, Dailymotion)
                                     // are download-only. If any link points to them, send to downloader and stay on YouTube!
                                     val isSocialPlatform = host.contains("facebook.com") || host.contains("instagram.com") ||
                                         host.contains("tiktok.com") || host.contains("pinterest.com") ||
-                                        host.contains("threads.net") || host.contains("dailymotion.com")
+                                        host.contains("dailymotion.com")
 
                                     if (isSocialPlatform) {
                                         viewModel.onUrlChanged(urlStr)
@@ -536,7 +585,7 @@ fun HomeScreen(
                                             if (!fallback.isNullOrBlank()) {
                                                 val fallbackHost = Uri.parse(fallback).host?.lowercase() ?: ""
                                                 if (!fallbackHost.contains("facebook.com") && !fallbackHost.contains("instagram.com") &&
-                                                    !fallbackHost.contains("tiktok.com") && !fallbackHost.contains("threads.net")) {
+                                                    !fallbackHost.contains("tiktok.com")) {
                                                     currentBrowserUrl = fallback
                                                     view.loadUrl(fallback)
                                                 }
@@ -546,7 +595,7 @@ fun HomeScreen(
                                         return true
                                     }
 
-                                    // Custom app schemes (e.g. threads://, barcelona://, instagram://, fb://, tiktok://, snssdk1233://, pinterest://):
+                                    // Custom app schemes (e.g. instagram://, fb://, tiktok://, snssdk1233://, pinterest://):
                                     // Never launch external app!
                                     return true
                                 }
@@ -610,6 +659,16 @@ fun HomeScreen(
                         .align(Alignment.BottomCenter)
                         .padding(bottom = 16.dp)
                         .clickable {
+                            val inputUrl = state.urlInput.trim()
+                            if (inputUrl.isNotBlank()) {
+                                if (state.isLoading) {
+                                    Toast.makeText(context, "Analyzing video, please wait...", Toast.LENGTH_SHORT).show()
+                                    return@clickable
+                                }
+                                viewModel.fetchInfo()
+                                return@clickable
+                            }
+
                             val liveUrl = webViewRef?.url?.takeIf { it.isNotBlank() } ?: currentBrowserUrl
                             val lower = liveUrl.lowercase()
 
@@ -625,15 +684,15 @@ fun HomeScreen(
                                 return@clickable
                             }
 
-                            // If direct video stream was intercepted by WebView (VidMate technique for FB / IG / Pinterest):
-                            if (!interceptedMediaUrl.isNullOrBlank()) {
+                            // If direct video stream was intercepted by WebView (for in-app YouTube browser):
+                            if (!interceptedMediaUrl.isNullOrBlank() && (lower.contains("youtube.com") || lower.contains("youtu.be"))) {
                                 fallbackVideoInfo = VideoInfo(
                                     url = liveUrl,
-                                    title = currentBrowserTitle.ifBlank { "Detected Video" },
+                                    title = currentBrowserTitle.ifBlank { "YouTube Video" },
                                     thumbnail = null,
                                     duration = null,
                                     uploader = null,
-                                    platform = Platform.fromUrl(liveUrl),
+                                    platform = Platform.YOUTUBE,
                                     formats = listOf(
                                         VideoFormat(
                                             formatId = "direct_hd_mp4",
@@ -662,11 +721,14 @@ fun HomeScreen(
                                     ),
                                 )
                                 showQualityPickerDialog = true
+                                return@clickable
                             }
 
-                            // Trigger backend analysis
-                            viewModel.onUrlChanged(liveUrl)
-                            viewModel.fetchInfo()
+                            // Trigger backend analysis for browser YouTube page
+                            if (lower.contains("youtube.com") || lower.contains("youtu.be")) {
+                                viewModel.onUrlChanged(liveUrl)
+                                viewModel.fetchInfo()
+                            }
                         }
                 ) {
                     Row(
@@ -791,12 +853,6 @@ private fun PlatformShortcutCard(
                     fontSize = 24.sp,
                     fontFamily = FontFamily.Serif
                 )
-                "Threads" -> Text(
-                    "@",
-                    color = Color.White,
-                    fontWeight = FontWeight.Bold,
-                    fontSize = 20.sp,
-                )
                 else -> Icon(Icons.Rounded.Language, contentDescription = null, tint = Color.White)
             }
         }
@@ -867,49 +923,135 @@ private fun QualityPickerDialog(
                 HorizontalDivider(color = Outline, thickness = 0.5.dp)
                 Spacer(Modifier.height(10.dp))
 
-                Text("Available Qualities", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold, color = TextSecondary)
-                Spacer(Modifier.height(8.dp))
+                val distinctFormats = remember(videoInfo.formats) {
+                    videoInfo.formats.distinctBy { it.quality }
+                }
+                val videoFormats = remember(distinctFormats) {
+                    distinctFormats.filter { it.hasVideo }
+                }
+                val audioFormats = remember(distinctFormats) {
+                    distinctFormats.filter { !it.hasVideo && it.hasAudio }
+                }
 
-                LazyColumn(modifier = Modifier.heightIn(max = 240.dp)) {
-                    items(videoInfo.formats) { format ->
-                        val isSelected = selectedFormat?.formatId == format.formatId
-                        Surface(
-                            color = if (isSelected) AccentGlow else SurfaceVariant,
-                            shape = RoundedCornerShape(12.dp),
-                            border = if (isSelected) androidx.compose.foundation.BorderStroke(1.dp, Accent) else null,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(vertical = 4.dp)
-                                .clickable { onFormatSelected(format) }
-                        ) {
+                LazyColumn(modifier = Modifier.heightIn(max = 320.dp)) {
+                    if (videoFormats.isNotEmpty()) {
+                        item {
                             Row(
-                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
-                                verticalAlignment = Alignment.CenterVertically
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.padding(vertical = 4.dp)
                             ) {
-                                RadioButton(
-                                    selected = isSelected,
-                                    onClick = { onFormatSelected(format) },
-                                    colors = RadioButtonDefaults.colors(selectedColor = Accent)
+                                Icon(Icons.Rounded.Videocam, contentDescription = null, tint = Accent, modifier = Modifier.size(18.dp))
+                                Spacer(Modifier.width(6.dp))
+                                Text(
+                                    "Video Options",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = TextPrimary
                                 )
-                                Spacer(Modifier.width(8.dp))
-                                Column(modifier = Modifier.weight(1f)) {
-                                    Text(
-                                        FormatLabels.qualityLabel(format),
-                                        style = MaterialTheme.typography.bodyMedium,
-                                        fontWeight = FontWeight.SemiBold,
-                                        color = if (isSelected) Accent else TextPrimary
+                            }
+                        }
+                        items(videoFormats, key = { it.formatId + it.quality }) { format ->
+                            val isSelected = selectedFormat?.formatId == format.formatId ||
+                                    (selectedFormat == null && format == videoFormats.firstOrNull())
+                            Surface(
+                                color = if (isSelected) AccentGlow else SurfaceVariant,
+                                shape = RoundedCornerShape(12.dp),
+                                border = if (isSelected) androidx.compose.foundation.BorderStroke(1.dp, Accent) else null,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 3.dp)
+                                    .clickable { onFormatSelected(format) }
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    RadioButton(
+                                        selected = isSelected,
+                                        onClick = { onFormatSelected(format) },
+                                        colors = RadioButtonDefaults.colors(selectedColor = Accent)
                                     )
+                                    Spacer(Modifier.width(8.dp))
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            FormatLabels.qualityLabel(format),
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = if (isSelected) Accent else TextPrimary
+                                        )
+                                        Text(
+                                            FormatLabels.metaLine(format),
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = TextSecondary
+                                        )
+                                    }
                                     Text(
-                                        FormatLabels.metaLine(format),
+                                        FormatLabels.sizeLabel(format, videoInfo.duration),
                                         style = MaterialTheme.typography.labelSmall,
-                                        color = TextSecondary
+                                        color = if (isSelected) Accent else TextMuted
                                     )
                                 }
+                            }
+                        }
+                    }
+
+                    if (audioFormats.isNotEmpty()) {
+                        item {
+                            Spacer(Modifier.height(8.dp))
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.padding(vertical = 4.dp)
+                            ) {
+                                Icon(Icons.Rounded.Audiotrack, contentDescription = null, tint = Accent, modifier = Modifier.size(18.dp))
+                                Spacer(Modifier.width(6.dp))
                                 Text(
-                                    FormatLabels.sizeLabel(format),
-                                    style = MaterialTheme.typography.labelSmall,
-                                    color = if (isSelected) Accent else TextMuted
+                                    "Audio Options (MP3)",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = TextPrimary
                                 )
+                            }
+                        }
+                        items(audioFormats, key = { it.formatId + it.quality }) { format ->
+                            val isSelected = selectedFormat?.formatId == format.formatId
+                            Surface(
+                                color = if (isSelected) AccentGlow else SurfaceVariant,
+                                shape = RoundedCornerShape(12.dp),
+                                border = if (isSelected) androidx.compose.foundation.BorderStroke(1.dp, Accent) else null,
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 3.dp)
+                                    .clickable { onFormatSelected(format) }
+                            ) {
+                                Row(
+                                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    RadioButton(
+                                        selected = isSelected,
+                                        onClick = { onFormatSelected(format) },
+                                        colors = RadioButtonDefaults.colors(selectedColor = Accent)
+                                    )
+                                    Spacer(Modifier.width(8.dp))
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            FormatLabels.qualityLabel(format),
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = if (isSelected) Accent else TextPrimary
+                                        )
+                                        Text(
+                                            FormatLabels.metaLine(format),
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = TextSecondary
+                                        )
+                                    }
+                                    Text(
+                                        FormatLabels.sizeLabel(format, videoInfo.duration),
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = if (isSelected) Accent else TextMuted
+                                    )
+                                }
                             }
                         }
                     }

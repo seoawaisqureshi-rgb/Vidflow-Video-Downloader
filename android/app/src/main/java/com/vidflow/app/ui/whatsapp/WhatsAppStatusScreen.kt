@@ -10,9 +10,12 @@ import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
 import android.widget.Toast
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedVisibility
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -60,6 +63,8 @@ data class WhatsAppStatusItem(
     val isVideo: Boolean,
     val sizeBytes: Long,
     val lastModified: Long,
+    val isNew: Boolean = false,
+    val isSaved: Boolean = false,
 )
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -77,23 +82,6 @@ fun WhatsAppStatusScreen(
     var selectedPreviewItem by remember { mutableStateOf<WhatsAppStatusItem?>(null) }
     var isLoading by remember { mutableStateOf(false) }
 
-    // SAF folder permission launcher for Android 11+
-    val folderLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.OpenDocumentTree()
-    ) { uri ->
-        if (uri != null) {
-            try {
-                context.contentResolver.takePersistableUriPermission(
-                    uri,
-                    Intent.FLAG_GRANT_READ_URI_PERMISSION
-                )
-                prefs.edit().putString("tree_uri", uri.toString()).apply()
-            } catch (e: Exception) {
-                // Ignore
-            }
-        }
-    }
-
     fun loadStatuses() {
         isLoading = true
         val list = mutableListOf<WhatsAppStatusItem>()
@@ -103,19 +91,30 @@ fun WhatsAppStatusScreen(
         if (!savedUriStr.isNullOrBlank()) {
             try {
                 val treeUri = Uri.parse(savedUriStr)
-                val docDir = DocumentFile.fromTreeUri(context, treeUri)
-                docDir?.listFiles()?.forEach { doc ->
-                    val name = doc.name?.lowercase() ?: ""
-                    if (doc.isFile && (name.endsWith(".mp4") || name.endsWith(".jpg") || name.endsWith(".jpeg") || name.endsWith(".png"))) {
-                        list.add(
-                            WhatsAppStatusItem(
-                                uri = doc.uri,
-                                name = doc.name ?: "status_${System.currentTimeMillis()}",
-                                isVideo = name.endsWith(".mp4"),
-                                sizeBytes = doc.length(),
-                                lastModified = doc.lastModified(),
+                // Drop the saved uri if its permission was revoked (e.g. app data cleared)
+                val hasPersisted = context.contentResolver.persistedUriPermissions.any { it.uri == treeUri && it.isReadPermission }
+                if (!hasPersisted) {
+                    prefs.edit().remove("tree_uri").apply()
+                } else {
+                    var statusesDir = DocumentFile.fromTreeUri(context, treeUri)
+                    // User grants the Media folder (the .Statuses folder itself is hidden
+                    // in the system picker), so look for .Statuses inside it.
+                    if (statusesDir != null && statusesDir.name?.endsWith(".Statuses") != true) {
+                        statusesDir = statusesDir.findFile(".Statuses")
+                    }
+                    statusesDir?.listFiles()?.forEach { doc ->
+                        val name = doc.name?.lowercase() ?: ""
+                        if (doc.isFile && (name.endsWith(".mp4") || name.endsWith(".jpg") || name.endsWith(".jpeg") || name.endsWith(".png"))) {
+                            list.add(
+                                WhatsAppStatusItem(
+                                    uri = doc.uri,
+                                    name = doc.name ?: "status_${System.currentTimeMillis()}",
+                                    isVideo = name.endsWith(".mp4"),
+                                    sizeBytes = doc.length(),
+                                    lastModified = doc.lastModified(),
+                                )
                             )
-                        )
+                        }
                     }
                 }
             } catch (e: Exception) {
@@ -160,6 +159,43 @@ fun WhatsAppStatusScreen(
         statusItems = list.sortedByDescending { it.lastModified }
         isLoading = false
         showStatusGrid = true
+    }
+
+    // SAF folder permission launcher for Android 11+
+    val folderLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocumentTree()
+    ) { uri ->
+        if (uri != null) {
+            try {
+                context.contentResolver.takePersistableUriPermission(
+                    uri,
+                    Intent.FLAG_GRANT_READ_URI_PERMISSION
+                )
+                prefs.edit().putString("tree_uri", uri.toString()).apply()
+                // Refresh immediately so granted statuses show without tapping "Check Again"
+                loadStatuses()
+            } catch (e: Exception) {
+                // Ignore
+            }
+        }
+    }
+
+    // System back must return to the WhatsApp menu: this screen is shown via a
+    // state flag (not a nav back stack), so without this the back button does nothing.
+    BackHandler(onBack = onBack)
+
+    // Auto-refresh every time the user comes back to this screen (e.g. after viewing
+    // statuses in WhatsApp, or right after granting the folder permission), so the
+    // list is never stale and nobody gets stuck tapping "Check Again".
+    val waActivity = context as? androidx.activity.ComponentActivity
+    DisposableEffect(waActivity) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                loadStatuses()
+            }
+        }
+        waActivity?.lifecycle?.addObserver(observer)
+        onDispose { waActivity?.lifecycle?.removeObserver(observer) }
     }
 
     Scaffold(
@@ -250,7 +286,7 @@ fun WhatsAppStatusScreen(
                             )
                             Spacer(Modifier.height(6.dp))
                             Text(
-                                "1. Open WhatsApp & view any status completely.\n2. Tap below if folder permission is required.",
+                                "1. Open WhatsApp & view any status completely.\n2. Tap below, then choose the WhatsApp > Media folder (statuses are read automatically).",
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = TextSecondary,
                                 textAlign = TextAlign.Center
@@ -260,8 +296,16 @@ fun WhatsAppStatusScreen(
                             // Grant permission button for Android 11+
                             Button(
                                 onClick = {
-                                    val initUri = Uri.parse("content://com.android.externalstorage.documents/document/primary%3AAndroid%2Fmedia%2Fcom.whatsapp%2FWhatsApp%2FMedia%2F.Statuses")
-                                    folderLauncher.launch(initUri)
+                                    val initUri = Uri.parse("content://com.android.externalstorage.documents/document/primary%3AAndroid%2Fmedia%2Fcom.whatsapp%2FWhatsApp%2FMedia")
+                                    try {
+                                        folderLauncher.launch(initUri)
+                                    } catch (e: Exception) {
+                                        try {
+                                            folderLauncher.launch(null)
+                                        } catch (e2: Exception) {
+                                            Toast.makeText(context, "Could not open folder picker: ${e2.message}", Toast.LENGTH_LONG).show()
+                                        }
+                                    }
                                 },
                                 colors = ButtonDefaults.buttonColors(containerColor = SurfaceVariant, contentColor = TextPrimary),
                                 shape = RoundedCornerShape(20.dp)

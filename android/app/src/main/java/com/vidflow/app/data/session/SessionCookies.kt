@@ -36,10 +36,6 @@ object SessionCookies {
             "Facebook", "https://www.facebook.com/login/",
             listOf("facebook.com"), Platform.FACEBOOK,
         ),
-        THREADS(
-            "Threads", "https://www.threads.net/login/",
-            listOf("threads.net", "threads.com", "instagram.com"), Platform.THREADS,
-        ),
         X(
             "X / Twitter", "https://x.com/i/flow/login/",
             listOf("x.com", "twitter.com"), Platform.TWITTER,

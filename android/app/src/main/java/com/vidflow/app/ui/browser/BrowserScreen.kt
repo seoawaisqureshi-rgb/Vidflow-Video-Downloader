@@ -135,17 +135,15 @@ fun BrowserScreen(
                 }
             }
 
-            // Platform shortcuts
+            // YouTube navigation shortcuts
             Row(
                 modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 listOf(
-                    Shortcut("Instagram", "https://www.instagram.com/"),
-                    Shortcut("Facebook", "https://www.facebook.com/"),
-                    Shortcut("Threads", "https://www.threads.net/"),
-                    Shortcut("YouTube", "https://www.youtube.com/"),
-                    Shortcut("TikTok", "https://www.tiktok.com/"),
+                    Shortcut("YouTube Home", "https://m.youtube.com/"),
+                    Shortcut("Trending", "https://m.youtube.com/feed/trending"),
+                    Shortcut("Music", "https://m.youtube.com/channel/UC-9-kyTW8ZkZNDHQJ6FgpwQ"),
                 ).forEach { shortcut ->
                     androidx.compose.material3.TextButton(
                         onClick = {
@@ -175,9 +173,14 @@ fun BrowserScreen(
                         settings.javaScriptEnabled = true
                         settings.domStorageEnabled = true
                         settings.mediaPlaybackRequiresUserGesture = false
-                        settings.userAgentString = settings.userAgentString
                         CookieManager.getInstance().setAcceptCookie(true)
                         webViewClient = object : WebViewClient() {
+                            override fun onPageStarted(view: WebView, url: String, favicon: android.graphics.Bitmap?) {
+                                super.onPageStarted(view, url, favicon)
+                                address = url
+                                detector.onPageStarted(view, url, favicon)
+                            }
+
                             override fun shouldInterceptRequest(
                                 view: WebView,
                                 request: android.webkit.WebResourceRequest,
@@ -198,7 +201,7 @@ fun BrowserScreen(
                             }
                         }
                         webViewRef = this
-                        loadUrl("https://www.instagram.com/")
+                        loadUrl("https://m.youtube.com/")
                     }
                 },
                 modifier = Modifier.fillMaxWidth().weight(1f),
