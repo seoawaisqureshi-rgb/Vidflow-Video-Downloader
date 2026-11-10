@@ -323,14 +323,6 @@ class DownloadRepository(context: Context) {
         // Parallel fragments: the single biggest download-speed win for
         // fragmented (DASH/HLS) streams, the way fast downloader apps work.
         addOption("--concurrent-fragments", "4")
-        // YouTube only: pin yt-dlp to the ANDROID player client. In 2026 the
-        // default client chain serves SABR / PO-token-gated streams that fail
-        // anonymously; the ANDROID client still serves plain streams without a
-        // PO token (required=False in yt-dlp). Matches the extractor's own
-        // ANDROID-first strategy. Other platforms are untouched.
-        if (info.platform == Platform.YOUTUBE) {
-            addOption("--extractor-args", "youtube:player_client=android")
-        }
         SessionCookies.writeCookiesTxt(appContext, info.platform)?.let { cookies ->
             addOption("--cookies", cookies.absolutePath)
         }

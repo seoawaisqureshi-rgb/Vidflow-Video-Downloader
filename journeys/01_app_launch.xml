@@ -1,0 +1,25 @@
+<journey name="App Launch and Home Screen">
+  <description>
+    Verifies that VidFlow launches successfully without crashing and displays the Home screen with all platform shortcuts and search controls.
+  </description>
+  <actions>
+    <action>
+      Launch the VidFlow app
+    </action>
+    <action>
+      Verify that the app does not crash and the process remains active
+    </action>
+    <action>
+      Verify that the Home screen is displayed
+    </action>
+    <action>
+      Verify that platform shortcuts (YouTube, WhatsApp, Instagram, Facebook, TikTok, X, Pinterest) are visible
+    </action>
+    <action>
+      Verify that the URL input and paste actions are visible and interactive
+    </action>
+    <action>
+      Verify that the bottom navigation bar displays Home, My Files, and Settings tabs
+    </action>
+  </actions>
+</journey>

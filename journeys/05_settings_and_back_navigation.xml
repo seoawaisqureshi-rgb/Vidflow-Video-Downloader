@@ -1,0 +1,40 @@
+<journey name="Settings and Back Press Navigation">
+  <description>
+    Tests navigating to Settings, pressing system back to return to the Home screen, and verifying standard double-back-to-exit behavior.
+  </description>
+  <actions>
+    <action>
+      Ensure the app is on the Home screen
+    </action>
+    <action>
+      Tap the "Settings" tab in the bottom navigation bar
+    </action>
+    <action>
+      Verify that the Settings screen opens with storage location, app version, and preferences
+    </action>
+    <action>
+      Press the Android device back button once
+    </action>
+    <action>
+      Verify that the app returns to the Home tab and does not close
+    </action>
+    <action>
+      Tap the "My Files" tab
+    </action>
+    <action>
+      Verify that the My Files screen is displayed
+    </action>
+    <action>
+      Press the Android device back button once
+    </action>
+    <action>
+      Verify that the app returns to the Home tab and does not close
+    </action>
+    <action>
+      Press the Android device back button once while on the Home tab
+    </action>
+    <action>
+      Verify that the "Press back again to exit" toast appears and the app remains active
+    </action>
+  </actions>
+</journey>

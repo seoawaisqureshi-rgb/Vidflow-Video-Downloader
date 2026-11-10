@@ -1,0 +1,31 @@
+<journey name="Paste Video Link and Quality Picker">
+  <description>
+    Tests entering or pasting a supported video link (YouTube, Instagram, Facebook, X, TikTok) and verifies that the quality picker dialog opens with resolutions (1080p, 720p, etc.) and MP3 audio options.
+  </description>
+  <actions>
+    <action>
+      Ensure the app is on the Home screen
+    </action>
+    <action>
+      Tap the URL input field to focus it
+    </action>
+    <action>
+      Enter a video link into the input field
+    </action>
+    <action>
+      Tap the "Download" or "Analyze" button
+    </action>
+    <action>
+      Verify that the analysis loading indicator appears
+    </action>
+    <action>
+      Verify that the Quality Picker dialog opens
+    </action>
+    <action>
+      Verify that video formats with clean labels (e.g. 1080p HD, 720p HD, 480p, 360p) and MP3 audio options are listed
+    </action>
+    <action>
+      Verify that each format item shows resolution and format badges
+    </action>
+  </actions>
+</journey>

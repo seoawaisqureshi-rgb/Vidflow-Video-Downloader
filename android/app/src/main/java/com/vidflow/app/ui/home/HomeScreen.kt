@@ -114,7 +114,10 @@ fun HomeScreen(
     }
 
     // Android back button: navigate history in WebView, or return to YouTube home
-    BackHandler {
+    // When at YouTube home and cannot go back, disabled so Navigation.kt handles double-back-to-exit
+    val canWebGoBack = webViewRef?.canGoBack() == true
+    val isNotHomeUrl = currentBrowserUrl != "https://m.youtube.com/"
+    BackHandler(enabled = canWebGoBack || isNotHomeUrl) {
         if (webViewRef?.canGoBack() == true) {
             webViewRef?.goBack()
         } else if (currentBrowserUrl != "https://m.youtube.com/") {

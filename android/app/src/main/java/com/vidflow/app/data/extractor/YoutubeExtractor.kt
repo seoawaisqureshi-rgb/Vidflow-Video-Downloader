@@ -455,7 +455,7 @@ internal class YoutubeExtractor(
             url = url, title = title, thumbnail = thumbnail, duration = duration,
             uploader = author, platform = Platform.YOUTUBE,
             formats = formats.sortedWith(compareByDescending<VideoFormat> {
-                it.quality.removeSuffix("p").substringBefore(" ").toIntOrNull() ?: 0
+                it.quality.substringBefore(" ").removeSuffix("p").toIntOrNull() ?: 0
             }.thenBy { if (it.needsYtDlp) 1 else 0 }),
         ))
     }

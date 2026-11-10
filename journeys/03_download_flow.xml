@@ -1,0 +1,34 @@
+<journey name="Download Execution and My Files">
+  <description>
+    Tests starting a download from the quality picker, verifying that the download notification and progress bar appear, and confirming the completed file is listed in My Files.
+  </description>
+  <actions>
+    <action>
+      Ensure the Quality Picker dialog is open with format options
+    </action>
+    <action>
+      Tap the desired quality format option (e.g. 720p HD or MP3)
+    </action>
+    <action>
+      Tap the "Start Download" confirmation button
+    </action>
+    <action>
+      Verify that the quality dialog dismisses and a confirmation toast or banner is displayed
+    </action>
+    <action>
+      Tap the "My Files" tab in the bottom navigation bar
+    </action>
+    <action>
+      Verify that the app navigates to the My Files screen
+    </action>
+    <action>
+      Verify that the active download appears with its title, progress bar, and speed indicator
+    </action>
+    <action>
+      Wait for the download to complete
+    </action>
+    <action>
+      Verify that the finished file appears in the completed downloads list with file size and media thumbnail
+    </action>
+  </actions>
+</journey>

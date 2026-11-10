@@ -1,6 +1,9 @@
 package com.vidflow.app
 
+import android.app.Activity
 import android.os.Environment
+import android.widget.Toast
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -42,6 +45,39 @@ fun MainNavigation(
     var showWhatsAppSaver by remember { mutableStateOf(false) }
     var showLoginScreen by remember { mutableStateOf(false) }
     var showFullScreenPlayer by remember { mutableStateOf(false) }
+    var lastBackPressTime by remember { mutableLongStateOf(0L) }
+
+    // Central Android back button handler:
+    // 1. Dismiss overlays (player, WhatsApp saver, Login screen)
+    // 2. Return to HOME tab from My Files / Settings
+    // 3. Double-back-to-exit on HOME screen
+    BackHandler {
+        when {
+            showFullScreenPlayer -> {
+                MediaPlayerManager.stop()
+                MediaPlayerManager.release()
+                showFullScreenPlayer = false
+            }
+            showWhatsAppSaver -> {
+                showWhatsAppSaver = false
+            }
+            showLoginScreen -> {
+                showLoginScreen = false
+            }
+            selectedTab != MainNavTab.HOME -> {
+                selectedTab = MainNavTab.HOME
+            }
+            else -> {
+                val now = System.currentTimeMillis()
+                if (now - lastBackPressTime < 2000) {
+                    (context as? Activity)?.finish()
+                } else {
+                    lastBackPressTime = now
+                    Toast.makeText(context, "Press back again to exit", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+    }
 
     Scaffold(
         containerColor = Background,

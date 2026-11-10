@@ -1,0 +1,25 @@
+<journey name="Media Player Playback">
+  <description>
+    Tests playing a downloaded video or audio file using the built-in ExoPlayer and MiniPlayer controls.
+  </description>
+  <actions>
+    <action>
+      Ensure the app is on the My Files screen with at least one completed download
+    </action>
+    <action>
+      Tap the completed media item
+    </action>
+    <action>
+      Verify that the built-in media player launches
+    </action>
+    <action>
+      Verify that the video starts playing and playback controls (play/pause, seek bar, time display) are functional
+    </action>
+    <action>
+      Tap the close or back button on the player
+    </action>
+    <action>
+      Verify that the player closes and the persistent MiniPlayer bar appears at the bottom if audio is active
+    </action>
+  </actions>
+</journey>
