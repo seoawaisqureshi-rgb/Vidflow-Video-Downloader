@@ -107,12 +107,13 @@ class DownloadRepository(context: Context) {
                 }
                 downloadWithYtDlp(info, selector, format, id, downloadId, sink)
             }
-            // YouTube with blank URL (legacy path)
-            info.platform == Platform.YOUTUBE && downloadUrl.isBlank() -> {
+            // All other YouTube video formats (even if InnerTube returned a downloadUrl)
+            // YouTube CDN streams are SABR-gated and fail on direct HTTP; yt-dlp handles them reliably.
+            info.platform == Platform.YOUTUBE -> {
+                val height = Regex("""(\d{3,4})p""").find(format.quality)?.groupValues?.get(1)?.toIntOrNull()
                 val selector = format.ytDlpFormatSelector.ifEmpty {
-                    if (format.hasVideo && !format.hasAudio)
-                        "${format.formatId}+bestaudio[ext=m4a]/${format.formatId}+bestaudio/bestvideo+bestaudio"
-                    else format.formatId.ifEmpty { "bestvideo+bestaudio/best" }
+                    if (height != null) "bestvideo[height<=$height]+bestaudio/bestvideo+bestaudio/best"
+                    else "bestvideo+bestaudio/best"
                 }
                 downloadWithYtDlp(info, selector, format, id, downloadId, sink)
             }
@@ -323,6 +324,12 @@ class DownloadRepository(context: Context) {
         // Parallel fragments: the single biggest download-speed win for
         // fragmented (DASH/HLS) streams, the way fast downloader apps work.
         addOption("--concurrent-fragments", "4")
+        // YouTube only: use android_vr,web_embedded,android client chain.
+        // Bypasses bot block / PO-token wall on standard web client while
+        // providing complete DASH video & audio streams.
+        if (info.platform == Platform.YOUTUBE) {
+            addOption("--extractor-args", "youtube:player_client=android_vr,web_embedded,android")
+        }
         SessionCookies.writeCookiesTxt(appContext, info.platform)?.let { cookies ->
             addOption("--cookies", cookies.absolutePath)
         }
@@ -469,11 +476,11 @@ class DownloadRepository(context: Context) {
     ): DownloadResult? = withContext(Dispatchers.IO) {
         val height = Regex("""(\d{3,4})p""").find(format.quality)?.groupValues?.get(1)?.toIntOrNull()
         val videoSelector = if (height != null) {
-            "bestvideo[height=$height]/bestvideo[height<=$height]/bestvideo"
+            "bestvideo[height=$height][ext=mp4]/bestvideo[height<=$height][ext=mp4]/bestvideo[height<=$height]/bestvideo"
         } else {
-            "bestvideo"
+            "bestvideo[ext=mp4]/bestvideo"
         }
-        val audioSelector = "bestaudio/best"
+        val audioSelector = "bestaudio[ext=m4a]/bestaudio/best"
         val videoTemplate = "${outputTemplate}_v"
         val audioTemplate = "${outputTemplate}_a"
 

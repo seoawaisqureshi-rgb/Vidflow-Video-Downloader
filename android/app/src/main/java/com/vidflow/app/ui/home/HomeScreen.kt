@@ -151,11 +151,90 @@ fun HomeScreen(
         ) {
             requestedBrowserUrl = input
             currentBrowserUrl = input
+            interceptedMediaUrl = null
+            detectedVideoOnPage = null
+            fallbackVideoInfo = null
+            viewModel.onUrlChanged("") // Clear input so floating download button isn't trapped in re-analyze loop
             Toast.makeText(context, "Opening in in-app browser to detect stream...", Toast.LENGTH_SHORT).show()
         } else {
             Toast.makeText(context, err, Toast.LENGTH_LONG).show()
         }
         viewModel.dismissError()
+    }
+
+    // Auto-open quality picker when stream is intercepted by in-app browser
+    LaunchedEffect(interceptedMediaUrl) {
+        val mediaUrl = interceptedMediaUrl ?: return@LaunchedEffect
+        val liveUrl = webViewRef?.url?.takeIf { it.isNotBlank() } ?: currentBrowserUrl
+        val lower = liveUrl.lowercase()
+        val currentPlatform = Platform.fromUrl(liveUrl)
+        val platformName = when {
+            lower.contains("instagram.com") -> "Instagram"
+            lower.contains("facebook.com") -> "Facebook"
+            lower.contains("youtube.com") || lower.contains("youtu.be") -> "YouTube"
+            lower.contains("tiktok.com") -> "TikTok"
+            else -> currentPlatform.displayName
+        }
+        fallbackVideoInfo = VideoInfo(
+            url = liveUrl,
+            title = currentBrowserTitle.ifBlank { "$platformName Video" },
+            thumbnail = null,
+            duration = null,
+            uploader = platformName,
+            platform = currentPlatform,
+            formats = listOf(
+                VideoFormat(
+                    formatId = "direct_hd_mp4",
+                    quality = "HD Video (MP4)",
+                    ext = "mp4",
+                    filesize = null,
+                    fps = 30,
+                    vcodec = "h264",
+                    acodec = "aac",
+                    hasVideo = true,
+                    hasAudio = true,
+                    downloadUrl = mediaUrl,
+                ),
+                VideoFormat(
+                    formatId = "direct_sd_mp4",
+                    quality = "SD Video (MP4)",
+                    ext = "mp4",
+                    filesize = null,
+                    fps = 30,
+                    vcodec = "h264",
+                    acodec = "aac",
+                    hasVideo = true,
+                    hasAudio = true,
+                    downloadUrl = mediaUrl,
+                ),
+                VideoFormat(
+                    formatId = "direct_mp3_320k",
+                    quality = "MP3 (320 kbps)",
+                    ext = "mp3",
+                    filesize = null,
+                    fps = null,
+                    vcodec = null,
+                    acodec = "mp3",
+                    hasVideo = false,
+                    hasAudio = true,
+                    downloadUrl = mediaUrl,
+                ),
+                VideoFormat(
+                    formatId = "direct_mp3_128k",
+                    quality = "MP3 (128 kbps)",
+                    ext = "mp3",
+                    filesize = null,
+                    fps = null,
+                    vcodec = null,
+                    acodec = "mp3",
+                    hasVideo = false,
+                    hasAudio = true,
+                    downloadUrl = mediaUrl,
+                ),
+            ),
+        )
+        showQualityPickerDialog = true
+        Toast.makeText(context, "Video detected! Select quality to download.", Toast.LENGTH_SHORT).show()
     }
 
     // Clipboard listener that protects against re-analyzing active jobs
@@ -666,6 +745,69 @@ fun HomeScreen(
                         .align(Alignment.BottomCenter)
                         .padding(bottom = 16.dp)
                         .clickable {
+                            val liveUrl = webViewRef?.url?.takeIf { it.isNotBlank() } ?: currentBrowserUrl
+                            val lower = liveUrl.lowercase()
+
+                            // 1. If direct video stream was already intercepted by WebView, open quality dialog immediately
+                            if (!interceptedMediaUrl.isNullOrBlank()) {
+                                if (fallbackVideoInfo == null) {
+                                    val currentPlatform = Platform.fromUrl(liveUrl)
+                                    val platformName = when {
+                                        lower.contains("instagram.com") -> "Instagram"
+                                        lower.contains("facebook.com") -> "Facebook"
+                                        lower.contains("youtube.com") || lower.contains("youtu.be") -> "YouTube"
+                                        lower.contains("tiktok.com") -> "TikTok"
+                                        else -> currentPlatform.displayName
+                                    }
+                                    fallbackVideoInfo = VideoInfo(
+                                        url = liveUrl,
+                                        title = currentBrowserTitle.ifBlank { "$platformName Video" },
+                                        thumbnail = null,
+                                        duration = null,
+                                        uploader = platformName,
+                                        platform = currentPlatform,
+                                        formats = listOf(
+                                            VideoFormat(
+                                                formatId = "direct_hd_mp4", quality = "HD Video (MP4)", ext = "mp4",
+                                                filesize = null, fps = 30, vcodec = "h264", acodec = "aac",
+                                                hasVideo = true, hasAudio = true, downloadUrl = interceptedMediaUrl!!,
+                                            ),
+                                            VideoFormat(
+                                                formatId = "direct_sd_mp4", quality = "SD Video (MP4)", ext = "mp4",
+                                                filesize = null, fps = 30, vcodec = "h264", acodec = "aac",
+                                                hasVideo = true, hasAudio = true, downloadUrl = interceptedMediaUrl!!,
+                                            ),
+                                            VideoFormat(
+                                                formatId = "direct_mp3_320k", quality = "MP3 (320 kbps)", ext = "mp3",
+                                                filesize = null, fps = null, vcodec = null, acodec = "mp3",
+                                                hasVideo = false, hasAudio = true, downloadUrl = interceptedMediaUrl!!,
+                                            ),
+                                            VideoFormat(
+                                                formatId = "direct_mp3_128k", quality = "MP3 (128 kbps)", ext = "mp3",
+                                                filesize = null, fps = null, vcodec = null, acodec = "mp3",
+                                                hasVideo = false, hasAudio = true, downloadUrl = interceptedMediaUrl!!,
+                                            ),
+                                        ),
+                                    )
+                                }
+                                showQualityPickerDialog = true
+                                return@clickable
+                            }
+
+                            // 2. If fallback video info already generated, open dialog immediately
+                            if (fallbackVideoInfo != null) {
+                                showQualityPickerDialog = true
+                                return@clickable
+                            }
+
+                            // 3. If already analyzed video info exists for this URL
+                            val activeInfo = state.videoInfo
+                            if (activeInfo != null && (activeInfo.url == liveUrl || liveUrl.contains(activeInfo.url) || activeInfo.url.contains(liveUrl))) {
+                                showQualityPickerDialog = true
+                                return@clickable
+                            }
+
+                            // 4. If user entered a URL in the text bar, analyze it
                             val inputUrl = state.urlInput.trim()
                             if (inputUrl.isNotBlank()) {
                                 if (state.isLoading) {
@@ -676,94 +818,12 @@ fun HomeScreen(
                                 return@clickable
                             }
 
-                            val liveUrl = webViewRef?.url?.takeIf { it.isNotBlank() } ?: currentBrowserUrl
-                            val lower = liveUrl.lowercase()
-
-                            // If already analyzed for this URL, open dialog immediately
-                            val activeInfo = state.videoInfo ?: fallbackVideoInfo
-                            if (activeInfo != null && (activeInfo.url == liveUrl || liveUrl.contains(activeInfo.url) || activeInfo.url.contains(liveUrl))) {
-                                showQualityPickerDialog = true
-                                return@clickable
-                            }
-
                             if (state.isLoading) {
                                 Toast.makeText(context, "Analyzing video, please wait...", Toast.LENGTH_SHORT).show()
                                 return@clickable
                             }
 
-                            // If direct video stream was intercepted by WebView (Instagram, Facebook, YouTube, TikTok, etc.):
-                            if (!interceptedMediaUrl.isNullOrBlank()) {
-                                val currentPlatform = Platform.fromUrl(liveUrl)
-                                val platformName = when {
-                                    lower.contains("instagram.com") -> "Instagram"
-                                    lower.contains("facebook.com") -> "Facebook"
-                                    lower.contains("youtube.com") || lower.contains("youtu.be") -> "YouTube"
-                                    lower.contains("tiktok.com") -> "TikTok"
-                                    else -> currentPlatform.displayName
-                                }
-                                fallbackVideoInfo = VideoInfo(
-                                    url = liveUrl,
-                                    title = currentBrowserTitle.ifBlank { "$platformName Video" },
-                                    thumbnail = null,
-                                    duration = null,
-                                    uploader = platformName,
-                                    platform = currentPlatform,
-                                    formats = listOf(
-                                        VideoFormat(
-                                            formatId = "direct_hd_mp4",
-                                            quality = "HD Video (MP4)",
-                                            ext = "mp4",
-                                            filesize = null,
-                                            fps = 30,
-                                            vcodec = "h264",
-                                            acodec = "aac",
-                                            hasVideo = true,
-                                            hasAudio = true,
-                                            downloadUrl = interceptedMediaUrl!!,
-                                        ),
-                                        VideoFormat(
-                                            formatId = "direct_sd_mp4",
-                                            quality = "SD Video (MP4)",
-                                            ext = "mp4",
-                                            filesize = null,
-                                            fps = 30,
-                                            vcodec = "h264",
-                                            acodec = "aac",
-                                            hasVideo = true,
-                                            hasAudio = true,
-                                            downloadUrl = interceptedMediaUrl!!,
-                                        ),
-                                        VideoFormat(
-                                            formatId = "direct_mp3_320k",
-                                            quality = "MP3 (320 kbps)",
-                                            ext = "mp3",
-                                            filesize = null,
-                                            fps = null,
-                                            vcodec = null,
-                                            acodec = "mp3",
-                                            hasVideo = false,
-                                            hasAudio = true,
-                                            downloadUrl = interceptedMediaUrl!!,
-                                        ),
-                                        VideoFormat(
-                                            formatId = "direct_mp3_128k",
-                                            quality = "MP3 (128 kbps)",
-                                            ext = "mp3",
-                                            filesize = null,
-                                            fps = null,
-                                            vcodec = null,
-                                            acodec = "mp3",
-                                            hasVideo = false,
-                                            hasAudio = true,
-                                            downloadUrl = interceptedMediaUrl!!,
-                                        ),
-                                    ),
-                                )
-                                showQualityPickerDialog = true
-                                return@clickable
-                            }
-
-                            // Trigger backend analysis for current page
+                            // 5. Trigger backend analysis for current page
                             viewModel.onUrlChanged(liveUrl)
                             viewModel.fetchInfo()
                         }
