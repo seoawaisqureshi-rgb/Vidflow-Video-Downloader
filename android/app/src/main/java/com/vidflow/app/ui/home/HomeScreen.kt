@@ -98,6 +98,11 @@ fun HomeScreen(
         listOf(
             PlatformSymbol("YouTube", Color(0xFFFF0000), "https://m.youtube.com/", isYouTube = true),
             PlatformSymbol("WhatsApp", Color(0xFF25D366), "", isWhatsApp = true),
+            PlatformSymbol("Instagram", Color(0xFFE1306C), "https://www.instagram.com/"),
+            PlatformSymbol("Facebook", Color(0xFF1877F2), "https://m.facebook.com/"),
+            PlatformSymbol("TikTok", Color(0xFF000000), "https://www.tiktok.com/"),
+            PlatformSymbol("X", Color(0xFF000000), "https://x.com/"),
+            PlatformSymbol("Pinterest", Color(0xFFE60023), "https://www.pinterest.com/"),
         )
     }
 
@@ -133,10 +138,20 @@ fun HomeScreen(
         }
     }
 
-    // Handle extraction error: show actual error, never synthesize YouTube fallback from background browser
+    // Handle extraction error: show actual error, and fallback to in-app browser detection for FB/IG links
     LaunchedEffect(state.error) {
         val err = state.error ?: return@LaunchedEffect
-        Toast.makeText(context, err, Toast.LENGTH_LONG).show()
+        val input = state.urlInput.trim()
+        val lower = input.lowercase()
+        if (lower.contains("facebook.com") || lower.contains("fb.watch") ||
+            lower.contains("instagram.com")
+        ) {
+            requestedBrowserUrl = input
+            currentBrowserUrl = input
+            Toast.makeText(context, "Opening in in-app browser to detect stream...", Toast.LENGTH_SHORT).show()
+        } else {
+            Toast.makeText(context, err, Toast.LENGTH_LONG).show()
+        }
         viewModel.dismissError()
     }
 
@@ -321,13 +336,18 @@ fun HomeScreen(
                         items(platforms) { platform ->
                             PlatformShortcutCard(
                                 symbol = platform,
-                                isSelected = platform.isYouTube && currentBrowserUrl.contains("youtube.com"),
+                                isSelected = (platform.isYouTube && currentBrowserUrl.contains("youtube.com")) ||
+                                    (platform.name == "Instagram" && currentBrowserUrl.contains("instagram.com")) ||
+                                    (platform.name == "Facebook" && currentBrowserUrl.contains("facebook.com")),
                                 onClick = {
                                     if (platform.isWhatsApp) {
                                         onOpenWhatsAppSaver()
-                                    } else if (platform.isYouTube) {
-                                        requestedBrowserUrl = "https://m.youtube.com/"
-                                        currentBrowserUrl = "https://m.youtube.com/"
+                                    } else if (platform.url.isNotBlank()) {
+                                        interceptedMediaUrl = null
+                                        detectedVideoOnPage = null
+                                        requestedBrowserUrl = platform.url
+                                        currentBrowserUrl = platform.url
+                                        currentBrowserTitle = if (platform.isYouTube) "YouTube" else platform.name
                                     }
                                 }
                             )
@@ -559,21 +579,9 @@ fun HomeScreen(
                                         return true
                                     }
 
-                                    // The in-app browser is dedicated exclusively to YouTube.
-                                    // Social platforms (Facebook, Instagram, TikTok, Pinterest, Dailymotion)
-                                    // are download-only. If any link points to them, send to downloader and stay on YouTube!
-                                    val isSocialPlatform = host.contains("facebook.com") || host.contains("instagram.com") ||
-                                        host.contains("tiktok.com") || host.contains("pinterest.com") ||
-                                        host.contains("dailymotion.com")
-
-                                    if (isSocialPlatform) {
-                                        viewModel.onUrlChanged(urlStr)
-                                        viewModel.fetchInfo()
-                                        return true
-                                    }
-
+                                    // In-app browser handles web navigation inside VidFlow without kicking user out
                                     if (scheme == "http" || scheme == "https") {
-                                        return false // Allow normal YouTube browsing inside WebView
+                                        return false // Allow normal browsing inside WebView
                                     }
 
                                     // Intent schemes: do NOT kick user out to external apps.
@@ -583,12 +591,8 @@ fun HomeScreen(
                                             val fallback = parsedIntent.getStringExtra("browser_fallback_url")
                                                 ?: parsedIntent.dataString?.takeIf { it.startsWith("http") }
                                             if (!fallback.isNullOrBlank()) {
-                                                val fallbackHost = Uri.parse(fallback).host?.lowercase() ?: ""
-                                                if (!fallbackHost.contains("facebook.com") && !fallbackHost.contains("instagram.com") &&
-                                                    !fallbackHost.contains("tiktok.com")) {
-                                                    currentBrowserUrl = fallback
-                                                    view.loadUrl(fallback)
-                                                }
+                                                currentBrowserUrl = fallback
+                                                view.loadUrl(fallback)
                                                 return true
                                             }
                                         } catch (_: Exception) {}
@@ -684,15 +688,23 @@ fun HomeScreen(
                                 return@clickable
                             }
 
-                            // If direct video stream was intercepted by WebView (for in-app YouTube browser):
-                            if (!interceptedMediaUrl.isNullOrBlank() && (lower.contains("youtube.com") || lower.contains("youtu.be"))) {
+                            // If direct video stream was intercepted by WebView (Instagram, Facebook, YouTube, TikTok, etc.):
+                            if (!interceptedMediaUrl.isNullOrBlank()) {
+                                val currentPlatform = Platform.fromUrl(liveUrl)
+                                val platformName = when {
+                                    lower.contains("instagram.com") -> "Instagram"
+                                    lower.contains("facebook.com") -> "Facebook"
+                                    lower.contains("youtube.com") || lower.contains("youtu.be") -> "YouTube"
+                                    lower.contains("tiktok.com") -> "TikTok"
+                                    else -> currentPlatform.displayName
+                                }
                                 fallbackVideoInfo = VideoInfo(
                                     url = liveUrl,
-                                    title = currentBrowserTitle.ifBlank { "YouTube Video" },
+                                    title = currentBrowserTitle.ifBlank { "$platformName Video" },
                                     thumbnail = null,
                                     duration = null,
-                                    uploader = null,
-                                    platform = Platform.YOUTUBE,
+                                    uploader = platformName,
+                                    platform = currentPlatform,
                                     formats = listOf(
                                         VideoFormat(
                                             formatId = "direct_hd_mp4",
@@ -707,8 +719,20 @@ fun HomeScreen(
                                             downloadUrl = interceptedMediaUrl!!,
                                         ),
                                         VideoFormat(
-                                            formatId = "direct_mp3",
-                                            quality = "Audio Only (MP3)",
+                                            formatId = "direct_sd_mp4",
+                                            quality = "SD Video (MP4)",
+                                            ext = "mp4",
+                                            filesize = null,
+                                            fps = 30,
+                                            vcodec = "h264",
+                                            acodec = "aac",
+                                            hasVideo = true,
+                                            hasAudio = true,
+                                            downloadUrl = interceptedMediaUrl!!,
+                                        ),
+                                        VideoFormat(
+                                            formatId = "direct_mp3_320k",
+                                            quality = "MP3 (320 kbps)",
                                             ext = "mp3",
                                             filesize = null,
                                             fps = null,
@@ -717,18 +741,28 @@ fun HomeScreen(
                                             hasVideo = false,
                                             hasAudio = true,
                                             downloadUrl = interceptedMediaUrl!!,
-                                        )
+                                        ),
+                                        VideoFormat(
+                                            formatId = "direct_mp3_128k",
+                                            quality = "MP3 (128 kbps)",
+                                            ext = "mp3",
+                                            filesize = null,
+                                            fps = null,
+                                            vcodec = null,
+                                            acodec = "mp3",
+                                            hasVideo = false,
+                                            hasAudio = true,
+                                            downloadUrl = interceptedMediaUrl!!,
+                                        ),
                                     ),
                                 )
                                 showQualityPickerDialog = true
                                 return@clickable
                             }
 
-                            // Trigger backend analysis for browser YouTube page
-                            if (lower.contains("youtube.com") || lower.contains("youtu.be")) {
-                                viewModel.onUrlChanged(liveUrl)
-                                viewModel.fetchInfo()
-                            }
+                            // Trigger backend analysis for current page
+                            viewModel.onUrlChanged(liveUrl)
+                            viewModel.fetchInfo()
                         }
                 ) {
                     Row(

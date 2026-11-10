@@ -81,48 +81,41 @@ fun WhatsAppStatusScreen(
     var statusItems by remember { mutableStateOf<List<WhatsAppStatusItem>>(emptyList()) }
     var selectedPreviewItem by remember { mutableStateOf<WhatsAppStatusItem?>(null) }
     var isLoading by remember { mutableStateOf(false) }
+    var showPermissionRationaleDialog by remember { mutableStateOf(false) }
+
+    fun hasAllFilesAccess(): Boolean {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            Environment.isExternalStorageManager()
+        } else {
+            true
+        }
+    }
+
+    fun requestAllFilesAccess() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            try {
+                val intent = Intent(android.provider.Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION).apply {
+                    data = Uri.parse("package:${context.packageName}")
+                }
+                context.startActivity(intent)
+            } catch (_: Exception) {
+                try {
+                    val intent = Intent(android.provider.Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION)
+                    context.startActivity(intent)
+                } catch (e2: Exception) {
+                    Toast.makeText(context, "Could not open storage settings: ${e2.message}", Toast.LENGTH_SHORT).show()
+                }
+            }
+        }
+    }
 
     fun loadStatuses() {
         isLoading = true
         val list = mutableListOf<WhatsAppStatusItem>()
+        val seenSet = prefs.getStringSet("seen_statuses", emptySet()) ?: emptySet()
+        val savedSet = prefs.getStringSet("saved_statuses", emptySet()) ?: emptySet()
 
-        // 1. First, check saved SAF permission (Android 11+)
-        val savedUriStr = prefs.getString("tree_uri", null)
-        if (!savedUriStr.isNullOrBlank()) {
-            try {
-                val treeUri = Uri.parse(savedUriStr)
-                // Drop the saved uri if its permission was revoked (e.g. app data cleared)
-                val hasPersisted = context.contentResolver.persistedUriPermissions.any { it.uri == treeUri && it.isReadPermission }
-                if (!hasPersisted) {
-                    prefs.edit().remove("tree_uri").apply()
-                } else {
-                    var statusesDir = DocumentFile.fromTreeUri(context, treeUri)
-                    // User grants the Media folder (the .Statuses folder itself is hidden
-                    // in the system picker), so look for .Statuses inside it.
-                    if (statusesDir != null && statusesDir.name?.endsWith(".Statuses") != true) {
-                        statusesDir = statusesDir.findFile(".Statuses")
-                    }
-                    statusesDir?.listFiles()?.forEach { doc ->
-                        val name = doc.name?.lowercase() ?: ""
-                        if (doc.isFile && (name.endsWith(".mp4") || name.endsWith(".jpg") || name.endsWith(".jpeg") || name.endsWith(".png"))) {
-                            list.add(
-                                WhatsAppStatusItem(
-                                    uri = doc.uri,
-                                    name = doc.name ?: "status_${System.currentTimeMillis()}",
-                                    isVideo = name.endsWith(".mp4"),
-                                    sizeBytes = doc.length(),
-                                    lastModified = doc.lastModified(),
-                                )
-                            )
-                        }
-                    }
-                }
-            } catch (e: Exception) {
-                // Ignore SAF read error
-            }
-        }
-
-        // 2. Direct File scan fallback (Works on Android 10 and below, or accessible directories)
+        // 1. Primary path: Direct File scan (works directly with MANAGE_EXTERNAL_STORAGE on Android 11+, or on Android 10 and below)
         val possibleDirs = listOf(
             File(Environment.getExternalStorageDirectory(), "Android/media/com.whatsapp/WhatsApp/Media/.Statuses"),
             File(Environment.getExternalStorageDirectory(), "Android/media/com.whatsapp.w4b/WhatsApp Business/Media/.Statuses"),
@@ -145,16 +138,63 @@ fun WhatsAppStatusScreen(
                                         isVideo = name.endsWith(".mp4"),
                                         sizeBytes = file.length(),
                                         lastModified = file.lastModified(),
+                                        isNew = !seenSet.contains(file.name),
+                                        isSaved = savedSet.contains(file.name),
                                     )
                                 )
                             }
                         }
                     }
                 }
-            } catch (e: Exception) {
-                // Ignore
+            } catch (_: Exception) {
+                // Ignore direct file scan error
             }
         }
+
+        // 2. Secondary fallback: check saved SAF permission (Android 11+) if direct scan found nothing
+        if (list.isEmpty()) {
+            val savedUriStr = prefs.getString("tree_uri", null)
+            if (!savedUriStr.isNullOrBlank()) {
+                try {
+                    val treeUri = Uri.parse(savedUriStr)
+                    val hasPersisted = context.contentResolver.persistedUriPermissions.any { it.uri == treeUri && it.isReadPermission }
+                    if (!hasPersisted) {
+                        prefs.edit().remove("tree_uri").apply()
+                    } else {
+                        var statusesDir = DocumentFile.fromTreeUri(context, treeUri)
+                        if (statusesDir != null && statusesDir.name?.endsWith(".Statuses") != true) {
+                            statusesDir = statusesDir.findFile(".Statuses")
+                        }
+                        statusesDir?.listFiles()?.forEach { doc ->
+                            val name = doc.name?.lowercase() ?: ""
+                            if (doc.isFile && (name.endsWith(".mp4") || name.endsWith(".jpg") || name.endsWith(".jpeg") || name.endsWith(".png"))) {
+                                val rawName = doc.name ?: "status_${System.currentTimeMillis()}"
+                                if (list.none { it.name == rawName }) {
+                                    list.add(
+                                        WhatsAppStatusItem(
+                                            uri = doc.uri,
+                                            name = rawName,
+                                            isVideo = name.endsWith(".mp4"),
+                                            sizeBytes = doc.length(),
+                                            lastModified = doc.lastModified(),
+                                            isNew = !seenSet.contains(rawName),
+                                            isSaved = savedSet.contains(rawName),
+                                        )
+                                    )
+                                }
+                            }
+                        }
+                    }
+                } catch (_: Exception) {
+                    // Ignore SAF read error
+                }
+            }
+        }
+
+        // Update seen statuses so new ones can be diffed next time
+        val updatedSeen = seenSet.toMutableSet()
+        list.forEach { updatedSeen.add(it.name) }
+        prefs.edit().putStringSet("seen_statuses", updatedSeen).apply()
 
         statusItems = list.sortedByDescending { it.lastModified }
         isLoading = false
@@ -255,7 +295,11 @@ fun WhatsAppStatusScreen(
                         openWhatsAppSafely(context)
                     },
                     onCheckStatuses = {
-                        loadStatuses()
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && !hasAllFilesAccess()) {
+                            showPermissionRationaleDialog = true
+                        } else {
+                            loadStatuses()
+                        }
                     }
                 )
             } else {
@@ -286,45 +330,51 @@ fun WhatsAppStatusScreen(
                             )
                             Spacer(Modifier.height(6.dp))
                             Text(
-                                "1. Open WhatsApp & view any status completely.\n2. Tap below, then choose the WhatsApp > Media folder (statuses are read automatically).",
+                                "1. Open WhatsApp and view any status completely.\n2. Come back to VidFlow and tap Refresh Statuses.",
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = TextSecondary,
                                 textAlign = TextAlign.Center
                             )
                             Spacer(Modifier.height(16.dp))
 
-                            // Grant permission button for Android 11+
-                            Button(
-                                onClick = {
-                                    val initUri = Uri.parse("content://com.android.externalstorage.documents/document/primary%3AAndroid%2Fmedia%2Fcom.whatsapp%2FWhatsApp%2FMedia")
-                                    try {
-                                        folderLauncher.launch(initUri)
-                                    } catch (e: Exception) {
-                                        try {
-                                            folderLauncher.launch(null)
-                                        } catch (e2: Exception) {
-                                            Toast.makeText(context, "Could not open folder picker: ${e2.message}", Toast.LENGTH_LONG).show()
-                                        }
-                                    }
-                                },
-                                colors = ButtonDefaults.buttonColors(containerColor = SurfaceVariant, contentColor = TextPrimary),
-                                shape = RoundedCornerShape(20.dp)
-                            ) {
-                                Icon(Icons.Rounded.FolderShared, contentDescription = null, modifier = Modifier.size(18.dp), tint = Accent)
-                                Spacer(Modifier.width(8.dp))
-                                Text("Grant Statuses Folder Access")
+                            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && !hasAllFilesAccess()) {
+                                Button(
+                                    onClick = { showPermissionRationaleDialog = true },
+                                    colors = ButtonDefaults.buttonColors(containerColor = SurfaceVariant, contentColor = TextPrimary),
+                                    shape = RoundedCornerShape(20.dp)
+                                ) {
+                                    Icon(Icons.Rounded.FolderShared, contentDescription = null, modifier = Modifier.size(18.dp), tint = Accent)
+                                    Spacer(Modifier.width(8.dp))
+                                    Text("Grant All-Files Storage Access")
+                                }
+                                Spacer(Modifier.height(10.dp))
                             }
 
-                            Spacer(Modifier.height(10.dp))
+                            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                                OutlinedButton(
+                                    onClick = { openWhatsAppSafely(context) },
+                                    shape = RoundedCornerShape(20.dp)
+                                ) {
+                                    Icon(Icons.AutoMirrored.Rounded.OpenInNew, contentDescription = null, modifier = Modifier.size(18.dp))
+                                    Spacer(Modifier.width(6.dp))
+                                    Text("Open WhatsApp")
+                                }
 
-                            Button(
-                                onClick = { loadStatuses() },
-                                colors = ButtonDefaults.buttonColors(containerColor = Accent, contentColor = Background),
-                                shape = RoundedCornerShape(20.dp)
-                            ) {
-                                Icon(Icons.Rounded.Refresh, contentDescription = null, modifier = Modifier.size(18.dp))
-                                Spacer(Modifier.width(6.dp))
-                                Text("Check Again", fontWeight = FontWeight.Bold)
+                                Button(
+                                    onClick = {
+                                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && !hasAllFilesAccess()) {
+                                            showPermissionRationaleDialog = true
+                                        } else {
+                                            loadStatuses()
+                                        }
+                                    },
+                                    colors = ButtonDefaults.buttonColors(containerColor = Accent, contentColor = Background),
+                                    shape = RoundedCornerShape(20.dp)
+                                ) {
+                                    Icon(Icons.Rounded.Refresh, contentDescription = null, modifier = Modifier.size(18.dp))
+                                    Spacer(Modifier.width(6.dp))
+                                    Text("Refresh", fontWeight = FontWeight.Bold)
+                                }
                             }
                         }
                     }
@@ -361,6 +411,45 @@ fun WhatsAppStatusScreen(
                 saveStatus(context, item, scope)
                 selectedPreviewItem = null
             }
+        )
+    }
+
+    // Storage Permission Rationale Dialog (Android 11+)
+    if (showPermissionRationaleDialog) {
+        AlertDialog(
+            onDismissRequest = { showPermissionRationaleDialog = false },
+            title = {
+                Text(
+                    "All-Files Storage Access",
+                    fontWeight = FontWeight.Bold,
+                    color = TextPrimary
+                )
+            },
+            text = {
+                Text(
+                    "VidFlow needs All-Files Storage Access to read viewed WhatsApp and WhatsApp Business status files directly from your storage without requiring folder pickers.\n\nTap Continue to enable access in system settings.",
+                    color = TextSecondary,
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showPermissionRationaleDialog = false
+                        requestAllFilesAccess()
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = Accent, contentColor = Background)
+                ) {
+                    Text("Continue", fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showPermissionRationaleDialog = false }) {
+                    Text("Not Now", color = TextMuted)
+                }
+            },
+            containerColor = Surface,
+            shape = RoundedCornerShape(20.dp)
         )
     }
 }
@@ -642,6 +731,25 @@ private fun StatusGridItem(
                     contentDescription = "Video",
                     tint = Color.White,
                     modifier = Modifier.size(14.dp)
+                )
+            }
+        }
+
+        // New Item Badge
+        if (item.isNew) {
+            Box(
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .padding(6.dp)
+                    .clip(RoundedCornerShape(4.dp))
+                    .background(Color(0xFF25D366))
+                    .padding(horizontal = 5.dp, vertical = 2.dp)
+            ) {
+                Text(
+                    "NEW",
+                    color = Color.White,
+                    fontWeight = FontWeight.Bold,
+                    fontSize = 9.sp
                 )
             }
         }

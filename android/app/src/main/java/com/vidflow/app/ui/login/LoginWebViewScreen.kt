@@ -107,7 +107,7 @@ fun LoginWebViewScreen(
             )
             Spacer(Modifier.height(4.dp))
             Text(
-                "Sign in directly below. VidFlow never sees or stores your password — it stays completely inside your local browser. Once logged in, private videos & stories will download seamlessly.",
+                "Sign in directly below. VidFlow never sees or stores your password. It stays completely inside your local browser. Once logged in, private videos and stories will download seamlessly.",
                 style = MaterialTheme.typography.bodySmall,
                 color = TextSecondary,
             )
@@ -140,7 +140,7 @@ fun LoginWebViewScreen(
                 )
                 Spacer(Modifier.width(8.dp))
                 Text(
-                    if (loggedIn) "Logged in to ${selected.label} — stories & private videos ready"
+                    if (loggedIn) "Logged in to ${selected.label}: stories and private videos ready"
                     else "Sign in to ${selected.label} below",
                     style = MaterialTheme.typography.labelMedium,
                     color = if (loggedIn) Success else TextSecondary,

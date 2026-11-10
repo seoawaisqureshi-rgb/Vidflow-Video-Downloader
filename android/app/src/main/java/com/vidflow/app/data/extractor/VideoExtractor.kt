@@ -234,6 +234,19 @@ class VideoExtractor(
                     }
 
                     if (formats.isNotEmpty()) {
+                        val audioSrc = formats.firstOrNull { it.downloadUrl.isNotBlank() }?.downloadUrl
+                        if (audioSrc != null) {
+                            formats.add(VideoFormat(
+                                formatId = "ig_mp3_320k", quality = "MP3 (320 kbps)", ext = "mp3",
+                                filesize = null, fps = null, vcodec = null, acodec = "mp3",
+                                hasVideo = false, hasAudio = true, downloadUrl = audioSrc,
+                            ))
+                            formats.add(VideoFormat(
+                                formatId = "ig_mp3_128k", quality = "MP3 (128 kbps)", ext = "mp3",
+                                filesize = null, fps = null, vcodec = null, acodec = "mp3",
+                                hasVideo = false, hasAudio = true, downloadUrl = audioSrc,
+                            ))
+                        }
                         return Result.Success(VideoInfo(
                             url = url,
                             title = caption?.ifEmpty { "Instagram Video" } ?: "Instagram Video",
@@ -284,11 +297,23 @@ class VideoExtractor(
             Result.Success(VideoInfo(
                 url = url, title = title, thumbnail = thumb,
                 duration = null, uploader = null, platform = Platform.INSTAGRAM,
-                formats = listOf(VideoFormat(
-                    formatId = "hd", quality = "HD", ext = "mp4",
-                    filesize = null, fps = 30, vcodec = "h264", acodec = "aac",
-                    hasVideo = true, hasAudio = true, downloadUrl = videoUrl,
-                )),
+                formats = listOf(
+                    VideoFormat(
+                        formatId = "hd", quality = "HD", ext = "mp4",
+                        filesize = null, fps = 30, vcodec = "h264", acodec = "aac",
+                        hasVideo = true, hasAudio = true, downloadUrl = videoUrl,
+                    ),
+                    VideoFormat(
+                        formatId = "ig_embed_mp3_320k", quality = "MP3 (320 kbps)", ext = "mp3",
+                        filesize = null, fps = null, vcodec = null, acodec = "mp3",
+                        hasVideo = false, hasAudio = true, downloadUrl = videoUrl,
+                    ),
+                    VideoFormat(
+                        formatId = "ig_embed_mp3_128k", quality = "MP3 (128 kbps)", ext = "mp3",
+                        filesize = null, fps = null, vcodec = null, acodec = "mp3",
+                        hasVideo = false, hasAudio = true, downloadUrl = videoUrl,
+                    ),
+                ),
             ))
         } catch (e: Exception) {
             Log.d("VidFlow/IG-Embed", "Embed failed: ${e.message}")

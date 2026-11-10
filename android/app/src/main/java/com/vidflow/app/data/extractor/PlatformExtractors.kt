@@ -116,6 +116,7 @@ internal class TwitterExtractor(private val client: OkHttpClient) {
             val tweet = json.optJSONObject("tweet") ?: return null
             val media = tweet.optJSONObject("media") ?: return null
             val formats = mutableListOf<VideoFormat>()
+            val seenUrls = mutableSetOf<String>()
             val seenQuality = mutableSetOf<String>()
             val videoArrays = listOfNotNull(media.optJSONArray("videos"), media.optJSONArray("all"))
             var highestAudioSourceUrl: String? = null
@@ -131,22 +132,49 @@ internal class TwitterExtractor(private val client: OkHttpClient) {
                             val f = fmtArr.getJSONObject(j)
                             val fUrl = f.optString("url").takeIf { it.isNotEmpty() } ?: continue
                             if (!fUrl.contains(".mp4")) continue
+                            if (!seenUrls.add(fUrl)) continue
+
                             val br = f.optInt("bitrate", 0)
-                            val h = f.optInt("height", v.optInt("height", 0))
-                            val quality = when {
-                                h >= 1080 || br >= 2_000_000 -> "1080p HD"
-                                h >= 720 || br >= 800_000 -> "720p HD"
-                                h >= 480 || br >= 350_000 -> "480p"
-                                h >= 360 || br > 0 -> "360p"
-                                else -> "Standard MP4"
-                            }
                             if (br > maxAudioBitrate) {
                                 maxAudioBitrate = br
                                 highestAudioSourceUrl = fUrl
                             }
+
+                            // Extract TRUE resolution from the URL path segment (e.g. /vid/720x1280/ or /vid/avc1/1080x1920/)
+                            val resFromUrl = parseTwitterResolution(fUrl)
+                            val w = resFromUrl?.first ?: v.optInt("width", 0)
+                            val h = resFromUrl?.second ?: v.optInt("height", 0)
+                            val minDim = if (w > 0 && h > 0) minOf(w, h) else 0
+
+                            val tierPrefix = when {
+                                minDim >= 1080 -> "1080p Full HD"
+                                minDim >= 720 -> "720p HD"
+                                minDim >= 480 -> "480p"
+                                minDim >= 360 -> "360p"
+                                minDim > 0 -> "${minDim}p"
+                                else -> "MP4 Video"
+                            }
+                            val resDim = if (w > 0 && h > 0) "${w}x${h}" else ""
+                            val brStr = if (br >= 1_000_000) {
+                                String.format("%.1f Mbps", br / 1_000_000.0)
+                            } else if (br > 0) {
+                                "${br / 1000} kbps"
+                            } else ""
+
+                            val quality = buildString {
+                                append(tierPrefix)
+                                if (resDim.isNotEmpty() || brStr.isNotEmpty()) {
+                                    append(" (")
+                                    if (resDim.isNotEmpty()) append(resDim)
+                                    if (resDim.isNotEmpty() && brStr.isNotEmpty()) append(" • ")
+                                    if (brStr.isNotEmpty()) append(brStr)
+                                    append(")")
+                                }
+                            }
+
                             if (seenQuality.add(quality)) {
                                 formats.add(VideoFormat(
-                                    formatId = if (br > 0) br.toString() else "${v.optInt("width")}x$h",
+                                    formatId = "x_${formats.size}_${minDim}p",
                                     quality = quality, ext = "mp4",
                                     filesize = null, fps = null, vcodec = "h264", acodec = "aac",
                                     hasVideo = true, hasAudio = true, downloadUrl = fUrl,
@@ -155,14 +183,26 @@ internal class TwitterExtractor(private val client: OkHttpClient) {
                         }
                     } else {
                         val vUrl = v.optString("url").takeIf { it.isNotEmpty() && it.contains(".mp4") }
-                        if (vUrl != null && seenQuality.add("720p HD")) {
+                        if (vUrl != null && seenUrls.add(vUrl)) {
                             highestAudioSourceUrl = vUrl
-                            formats.add(VideoFormat(
-                                formatId = "default",
-                                quality = "720p HD", ext = "mp4",
-                                filesize = null, fps = null, vcodec = "h264", acodec = "aac",
-                                hasVideo = true, hasAudio = true, downloadUrl = vUrl,
-                            ))
+                            val resFromUrl = parseTwitterResolution(vUrl)
+                            val w = resFromUrl?.first ?: v.optInt("width", 0)
+                            val h = resFromUrl?.second ?: v.optInt("height", 0)
+                            val minDim = if (w > 0 && h > 0) minOf(w, h) else 0
+                            val label = when {
+                                minDim >= 1080 -> "1080p Full HD (${w}x${h})"
+                                minDim >= 720 -> "720p HD (${w}x${h})"
+                                minDim > 0 -> "${minDim}p (${w}x${h})"
+                                else -> "MP4 Video"
+                            }
+                            if (seenQuality.add(label)) {
+                                formats.add(VideoFormat(
+                                    formatId = "default",
+                                    quality = label, ext = "mp4",
+                                    filesize = null, fps = null, vcodec = "h264", acodec = "aac",
+                                    hasVideo = true, hasAudio = true, downloadUrl = vUrl,
+                                ))
+                            }
                         }
                     }
                 }
@@ -170,11 +210,23 @@ internal class TwitterExtractor(private val client: OkHttpClient) {
             }
             if (formats.isEmpty()) return null
 
-            // Add MP3 audio option from the video stream
+            // Add MP3 audio options from highest bitrate stream
             if (highestAudioSourceUrl != null) {
                 formats.add(VideoFormat(
-                    formatId = "mp3_audio",
-                    quality = "MP3 Audio (128 kbps)",
+                    formatId = "mp3_320k",
+                    quality = "MP3 (320 kbps)",
+                    ext = "mp3",
+                    filesize = null,
+                    fps = null,
+                    vcodec = null,
+                    acodec = "mp3",
+                    hasVideo = false,
+                    hasAudio = true,
+                    downloadUrl = highestAudioSourceUrl,
+                ))
+                formats.add(VideoFormat(
+                    formatId = "mp3_128k",
+                    quality = "MP3 (128 kbps)",
                     ext = "mp3",
                     filesize = null,
                     fps = null,
@@ -193,10 +245,23 @@ internal class TwitterExtractor(private val client: OkHttpClient) {
                 thumbnail = null, duration = null, uploader = "@$author",
                 platform = Platform.TWITTER,
                 formats = formats.sortedWith(compareByDescending<VideoFormat> {
-                    it.quality.removeSuffix("p HD").removeSuffix("p").toIntOrNull() ?: 0
+                    val q = it.quality
+                    val pMatch = Regex("""(\d{3,4})p""").find(q)
+                    pMatch?.groupValues?.get(1)?.toIntOrNull() ?: 0
                 }.thenBy { if (!it.hasVideo) 1 else 0 }),
             ))
         } catch (_: Exception) { null }
+    }
+
+    private fun parseTwitterResolution(url: String): Pair<Int, Int>? {
+        val match = Regex("""/(?:vid(?:/[a-zA-Z0-9_-]+)?|vid)/(\d+)x(\d+)/""").find(url)
+            ?: Regex("""/(\d{3,4})x(\d{3,4})/""").find(url)
+        if (match != null) {
+            val w = match.groupValues[1].toIntOrNull() ?: 0
+            val h = match.groupValues[2].toIntOrNull() ?: 0
+            if (w > 0 && h > 0) return Pair(w, h)
+        }
+        return null
     }
 
     private fun tryVxTwitter(url: String, tweetId: String): VideoExtractor.Result? {
@@ -245,15 +310,41 @@ internal class TwitterExtractor(private val client: OkHttpClient) {
                     val type = v.optString("type")
                     if (!type.contains("mp4")) continue
                     val vUrl = v.optString("src").ifEmpty { v.optString("url") }.takeIf { it.isNotEmpty() } ?: continue
-                    val bitrate = v.optInt("bitrate")
-                    val quality = when {
-                        bitrate >= 2_000_000 -> "720p+"
-                        bitrate >= 800_000 -> "480p"
-                        bitrate > 0 -> "360p"
-                        else -> "Best"
+                    val bitrate = v.optInt("bitrate", 0)
+                    val res = parseTwitterResolution(vUrl)
+                    val w = res?.first ?: 0
+                    val h = res?.second ?: 0
+                    val minDim = if (w > 0 && h > 0) minOf(w, h) else 0
+
+                    val tierPrefix = when {
+                        minDim >= 1080 -> "1080p Full HD"
+                        minDim >= 720 -> "720p HD"
+                        minDim >= 480 -> "480p"
+                        minDim >= 360 -> "360p"
+                        minDim > 0 -> "${minDim}p"
+                        else -> "MP4 Video"
                     }
+                    val resDim = if (w > 0 && h > 0) "${w}x${h}" else ""
+                    val brStr = if (bitrate >= 1_000_000) {
+                        String.format("%.1f Mbps", bitrate / 1_000_000.0)
+                    } else if (bitrate > 0) {
+                        "${bitrate / 1000} kbps"
+                    } else ""
+
+                    val quality = buildString {
+                        append(tierPrefix)
+                        if (resDim.isNotEmpty() || brStr.isNotEmpty()) {
+                            append(" (")
+                            if (resDim.isNotEmpty()) append(resDim)
+                            if (resDim.isNotEmpty() && brStr.isNotEmpty()) append(" • ")
+                            if (brStr.isNotEmpty()) append(brStr)
+                            append(")")
+                        }
+                    }
+
                     formats.add(VideoFormat(
-                        formatId = bitrate.toString(), quality = quality, ext = "mp4",
+                        formatId = "syn_${formats.size}_${minDim}p",
+                        quality = quality, ext = "mp4",
                         filesize = null, fps = null, vcodec = "h264", acodec = "aac",
                         hasVideo = true, hasAudio = true, downloadUrl = vUrl,
                     ))
@@ -567,26 +658,46 @@ internal class InstagramExtractor(private val client: OkHttpClient) {
 internal class FacebookExtractor(private val client: OkHttpClient) {
     fun extract(url: String): VideoExtractor.Result {
         return try {
+            // Resolve any short or redirect links first
+            val targetUrl = if (url.contains("fb.watch") || url.contains("/share/")) {
+                VideoExtractor.resolveRedirect(client, url)
+            } else url
+
             // Method 1: Desktop Chrome UA (gives full JSON with browser_native_hd_url / playable_url)
             val desktopHeaders = mapOf(
-                "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                "User-Agent" to "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36",
                 "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                 "Accept-Language" to "en-US,en;q=0.9",
                 "Sec-Fetch-Site" to "none",
             )
-            var html = client.getText(url, desktopHeaders)
+            var html = client.getText(targetUrl, desktopHeaders)
 
             var hdUrl = extractHdUrl(html)
             var sdUrl = extractSdUrl(html)
 
-            // Method 2: If desktop didn't return stream, try facebookexternalhit crawler (bypasses login for link previews)
+            // Method 2: Mobile Chrome UA
+            if (hdUrl == null && sdUrl == null) {
+                val mobileHeaders = mapOf(
+                    "User-Agent" to "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36",
+                    "Accept" to "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    "Accept-Language" to "en-US,en;q=0.9",
+                )
+                val mobileHtml = client.getText(targetUrl, mobileHeaders)
+                if (mobileHtml != null) {
+                    html = mobileHtml
+                    hdUrl = extractHdUrl(mobileHtml)
+                    sdUrl = extractSdUrl(mobileHtml)
+                }
+            }
+
+            // Method 3: If desktop/mobile didn't return stream, try facebookexternalhit crawler (bypasses login for link previews)
             if (hdUrl == null && sdUrl == null) {
                 val crawlerHeaders = mapOf(
                     "User-Agent" to "facebookexternalhit/1.1 (+http://www.facebook.com/externalhit_uatext.php)",
                     "Accept" to "*/*",
                     "Accept-Language" to "en-US,en;q=0.9",
                 )
-                val crawlerHtml = client.getText(url, crawlerHeaders)
+                val crawlerHtml = client.getText(targetUrl, crawlerHeaders)
                 if (crawlerHtml != null) {
                     html = crawlerHtml
                     hdUrl = extractHdUrl(crawlerHtml)
@@ -598,7 +709,7 @@ internal class FacebookExtractor(private val client: OkHttpClient) {
                 return VideoExtractor.Result.Error(
                     "Could not find Facebook video stream.\n\n" +
                     "• Ensure the post/video is public\n" +
-                    "• Private group posts require login"
+                    "• Try opening in browser or check that the link is correct"
                 )
             }
 
@@ -622,6 +733,21 @@ internal class FacebookExtractor(private val client: OkHttpClient) {
                     formatId = "sd", quality = if (hdUrl != null) "SD 360p" else "Best Available", ext = "mp4",
                     filesize = null, fps = 30, vcodec = "h264", acodec = "aac",
                     hasVideo = true, hasAudio = true, downloadUrl = sdUrl,
+                ))
+            }
+
+            // Add MP3 options from audio of video stream
+            val audioSource = hdUrl ?: sdUrl
+            if (audioSource != null) {
+                formats.add(VideoFormat(
+                    formatId = "fb_mp3_320k", quality = "MP3 (320 kbps)", ext = "mp3",
+                    filesize = null, fps = null, vcodec = null, acodec = "mp3",
+                    hasVideo = false, hasAudio = true, downloadUrl = audioSource,
+                ))
+                formats.add(VideoFormat(
+                    formatId = "fb_mp3_128k", quality = "MP3 (128 kbps)", ext = "mp3",
+                    filesize = null, fps = null, vcodec = null, acodec = "mp3",
+                    hasVideo = false, hasAudio = true, downloadUrl = audioSource,
                 ))
             }
 

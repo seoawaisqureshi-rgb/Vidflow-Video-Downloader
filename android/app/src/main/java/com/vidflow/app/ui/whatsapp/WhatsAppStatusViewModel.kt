@@ -119,8 +119,47 @@ class WhatsAppStatusViewModel(application: Application) : AndroidViewModel(appli
         val previouslySeen = prefs.getStringSet("seen_statuses", emptySet()) ?: emptySet()
         val savedNames = prefs.getStringSet("saved_statuses", emptySet()) ?: emptySet()
 
-        // 1. SAF Tree scan (if not forced to direct only)
-        if (!forceDirectOnly) {
+        // 1. Direct File scan (Primary reference way: reads directly via MANAGE_EXTERNAL_STORAGE)
+        val possibleDirs = listOf(
+            File(Environment.getExternalStorageDirectory(), "Android/media/com.whatsapp/WhatsApp/Media/.Statuses"),
+            File(Environment.getExternalStorageDirectory(), "Android/media/com.whatsapp.w4b/WhatsApp Business/Media/.Statuses"),
+            File(Environment.getExternalStorageDirectory(), "WhatsApp/Media/.Statuses"),
+            File(Environment.getExternalStorageDirectory(), "WhatsApp Business/Media/.Statuses"),
+        )
+
+        for (dir in possibleDirs) {
+            try {
+                if (dir.exists() && dir.isDirectory) {
+                    val files = dir.listFiles()
+                    if (files != null && files.isNotEmpty()) {
+                        files.forEach { file ->
+                            val name = file.name.lowercase()
+                            if (file.isFile && (name.endsWith(".mp4") || name.endsWith(".jpg") || name.endsWith(".jpeg") || name.endsWith(".png"))) {
+                                if (results.none { it.name == file.name }) {
+                                    results.add(
+                                        WhatsAppStatusItem(
+                                            uri = Uri.fromFile(file),
+                                            name = file.name,
+                                            isVideo = name.endsWith(".mp4"),
+                                            sizeBytes = file.length(),
+                                            lastModified = file.lastModified(),
+                                            isNew = !previouslySeen.contains(file.name),
+                                            isSaved = savedNames.contains(file.name),
+                                        )
+                                    )
+                                }
+                            }
+                        }
+                        if (results.isNotEmpty() && pathUsed == "None") {
+                            pathUsed = "Direct File scan: ${dir.path}"
+                        }
+                    }
+                }
+            } catch (_: Exception) {}
+        }
+
+        // 2. SAF Tree scan fallback (if direct scan found nothing and not forced to direct only)
+        if (results.isEmpty() && !forceDirectOnly) {
             val savedUriStr = prefs.getString("tree_uri", null)
             if (!savedUriStr.isNullOrBlank()) {
                 val treeUri = runCatching { Uri.parse(savedUriStr) }.getOrNull()
@@ -165,47 +204,6 @@ class WhatsAppStatusViewModel(application: Application) : AndroidViewModel(appli
                         prefs.edit().remove("tree_uri").apply()
                     }
                 }
-            }
-        }
-
-        // 2. Direct File scan fallback (Samsung Android or accessible scoped directories)
-        if (results.isEmpty()) {
-            val possibleDirs = listOf(
-                File(Environment.getExternalStorageDirectory(), "Android/media/com.whatsapp/WhatsApp/Media/.Statuses"),
-                File(Environment.getExternalStorageDirectory(), "Android/media/com.whatsapp.w4b/WhatsApp Business/Media/.Statuses"),
-                File(Environment.getExternalStorageDirectory(), "WhatsApp/Media/.Statuses"),
-                File(Environment.getExternalStorageDirectory(), "WhatsApp Business/Media/.Statuses"),
-            )
-
-            for (dir in possibleDirs) {
-                try {
-                    if (dir.exists() && dir.isDirectory) {
-                        val files = dir.listFiles()
-                        if (files != null && files.isNotEmpty()) {
-                            files.forEach { file ->
-                                val name = file.name.lowercase()
-                                if (file.isFile && (name.endsWith(".mp4") || name.endsWith(".jpg") || name.endsWith(".jpeg") || name.endsWith(".png"))) {
-                                    if (results.none { it.name == file.name }) {
-                                        results.add(
-                                            WhatsAppStatusItem(
-                                                uri = Uri.fromFile(file),
-                                                name = file.name,
-                                                isVideo = name.endsWith(".mp4"),
-                                                sizeBytes = file.length(),
-                                                lastModified = file.lastModified(),
-                                                isNew = !previouslySeen.contains(file.name),
-                                                isSaved = savedNames.contains(file.name),
-                                            )
-                                        )
-                                    }
-                                }
-                            }
-                            if (results.isNotEmpty() && pathUsed == "None") {
-                                pathUsed = "Direct File scan: ${dir.path}"
-                            }
-                        }
-                    }
-                } catch (_: Exception) {}
             }
         }
 

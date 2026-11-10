@@ -217,7 +217,7 @@ fun BrowserScreen(
                 ) {
                     item {
                         Text(
-                            "Video detected — tap Download to fetch qualities",
+                            "Video detected. Tap Download to fetch qualities.",
                             style = MaterialTheme.typography.labelMedium,
                             color = TextPrimary,
                             fontWeight = FontWeight.SemiBold,
